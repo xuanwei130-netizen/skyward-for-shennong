@@ -31,6 +31,10 @@ partition mounting fixes of this branch.
 - Reboot to system, recovery, fastboot, bootloader or EDL, and switch slots
 - Light and dark themes; Simplified Chinese, Traditional Chinese and English
 
+## Known issues
+
+- USB drives are not recognized when plugged in.
+
 ## Supported devices
 
 | Device | Codename | Built on |
