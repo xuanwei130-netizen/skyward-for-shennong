@@ -7858,10 +7858,9 @@ mod tests {
 
     #[test]
     fn a_control_that_cannot_work_explains_itself() {
-        let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Mount, W, H, PPD);
         app.set_mounts(Ok(vec![MountRow { base: "odm".into(), point: "/odm".into(), mounted: true, holders: vec!["qseecomd".into()] }]));
-        tap(&mut app, &f, &i, Action::Unavailable("无法卸载正在使用的分区"));
+        app.act(Action::Unavailable("无法卸载正在使用的分区"), 0);
         assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("无法卸载正在使用的分区"));
         // Once the row tapped has faded back, only the message waits.
         app.tick(1000);
@@ -7892,7 +7891,7 @@ mod tests {
         tap_back(&mut app, &f, &i, 2000);
         app.tick(3000);
         tap(&mut app, &f, &i, Action::Open(Screen::Mount));
-        tap(&mut app, &f, &i, Action::Unavailable("A partition in use can't be unmounted"));
+        app.act(Action::Unavailable("A partition in use can't be unmounted"), 3000);
         assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("A partition in use can't be unmounted"), "as do its messages");
     }
 
