@@ -217,7 +217,7 @@ fn run(s: &Service, who: &Credentials) -> Result<String> {
         let path = s.path.clone();
         thread::Builder::new().name(format!("err-{pid}")).spawn(move || {
             use std::io::{BufRead, BufReader};
-            for line in BufReader::new(pipe).lines().filter_map(|line| line.ok()) {
+            for line in BufReader::new(pipe).lines().map_while(Result::ok) {
                 let _ = skyward_sys::kmsg(&format!("{path}: {line}"));
             }
         })
