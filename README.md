@@ -34,6 +34,7 @@ partition mounting fixes of this branch.
 ## Known issues
 
 - USB drives are not recognized when plugged in.
+- Some partitions cannot be mounted (tested: this does not affect flashing ROMs).
 
 ## Supported devices
 
