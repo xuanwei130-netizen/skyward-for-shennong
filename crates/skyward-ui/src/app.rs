@@ -1622,7 +1622,7 @@ impl Default for State {
         State {
             lang: Lang::Hans,
             dark: false,
-            brightness: SLIDER_START,
+            brightness: BRIGHTNESS_START,
             // Two minutes.
             screen_off: 3,
             time_zone: 0,
@@ -2084,8 +2084,14 @@ const DIM_CEILING: f32 = 0.05;
 const MIN_BRIGHTNESS: f32 = 0.02;
 /// How much of a slider's span a volume key moves it.
 const SLIDER_STEP: f32 = 0.1;
-/// Where both sliders start: one step of the keys from their left end.
+/// Where the vibration slider starts: one step of the keys from its left
+/// end.
 pub const SLIDER_START: f32 = SLIDER_STEP;
+/// Where the brightness slider starts. A step from the left end would leave
+/// the panel almost dark, since the gamma raises the slider's position
+/// before it is written: the bottom tenth of the slider is under a
+/// hundredth of the light the panel can give.
+pub const BRIGHTNESS_START: f32 = 0.5;
 /// While the backlight eases, it steps once a frame of a 120 Hz panel.
 const BACKLIGHT_STEP_MS: u64 = 8;
 /// Just after the panel lights, a touch or key only keeps it awake: the
@@ -8221,14 +8227,16 @@ mod tests {
         let mut app = App::new(Screen::Settings, W, H, PPD);
         app.frame(&f, &i);
         light_on(&mut app, &f, &i, Stop::Hit(Action::Slider(Slider::Brightness)));
-        assert_eq!(app.state.brightness, SLIDER_START, "it starts a step from its left end");
+        assert_eq!(app.state.brightness, BRIGHTNESS_START, "it starts where the pages can be read");
         press(&mut app, Key::Power, 0);
         assert_eq!(app.toast.as_ref().map(|t| t.0.as_str()), Some("按音量键调节亮度，按电源键完成"));
         assert!(press(&mut app, Key::VolumeUp, 0).is_empty(), "the panel shows the brightness");
-        assert!((app.state.brightness - (SLIDER_START + SLIDER_STEP)).abs() < 1e-5, "up turns it up");
+        assert!((app.state.brightness - (BRIGHTNESS_START + SLIDER_STEP)).abs() < 1e-5, "up turns it up");
         press(&mut app, Key::VolumeDown, 0);
-        assert!((app.state.brightness - SLIDER_START).abs() < 1e-5, "down turns it down");
-        press(&mut app, Key::VolumeDown, 0);
+        assert!((app.state.brightness - BRIGHTNESS_START).abs() < 1e-5, "down turns it down");
+        for _ in 0..6 {
+            press(&mut app, Key::VolumeDown, 0);
+        }
         assert_eq!(app.state.brightness, MIN_BRIGHTNESS, "no lower than the slider's floor");
         assert_eq!(lit(&mut app, &f, &i), Some(Stop::Hit(Action::Slider(Slider::Brightness))), "the light stays on the slider");
         press(&mut app, Key::Power, 0);
@@ -10368,13 +10376,13 @@ mod tests {
     fn power_key_turns_the_panel_off_and_on() {
         let mut app = App::new(Screen::Home, W, H, PPD);
         assert!(app.key(Key::Power, 0).is_empty());
-        assert_eq!(app.panel(0), Some(SLIDER_START), "it waits for volume down first");
+        assert_eq!(app.panel(0), Some(BRIGHTNESS_START), "it waits for volume down first");
         assert_eq!(app.deadline(0), Some(CHORD_MS));
         assert!(app.tick(CHORD_MS).is_empty());
         assert_eq!(app.panel(CHORD_MS), None, "held on alone, it turns the panel off");
         assert!(app.key_up(Key::Power, CHORD_MS + 50).is_empty());
         assert!(app.key(Key::Power, CHORD_MS + 60).is_empty());
-        assert_eq!(app.panel(CHORD_MS + 60), Some(SLIDER_START));
+        assert_eq!(app.panel(CHORD_MS + 60), Some(BRIGHTNESS_START));
         assert!(app.key_up(Key::Power, CHORD_MS + 100).is_empty());
         assert!(app.key(Key::Power, 1000).is_empty());
         assert!(app.key_up(Key::Power, 1050).is_empty());
@@ -10453,12 +10461,12 @@ mod tests {
         app.tick(0);
         assert_eq!(app.deadline(0), Some(DIMS));
         app.tick(DIMS - 1);
-        assert_eq!(app.panel(DIMS - 1), Some(SLIDER_START));
+        assert_eq!(app.panel(DIMS - 1), Some(BRIGHTNESS_START));
         app.tick(DIMS);
         assert_eq!(app.deadline(DIMS), Some(DIMS + BACKLIGHT_STEP_MS), "the backlight steps down a frame at a time");
         let midway = app.panel(DIMS + 250).unwrap();
-        assert!(midway < SLIDER_START && midway > dim_level(SLIDER_START), "{midway}");
-        assert_eq!(app.panel(DIMS + 500), Some(dim_level(SLIDER_START)));
+        assert!(midway < BRIGHTNESS_START && midway > dim_level(BRIGHTNESS_START), "{midway}");
+        assert_eq!(app.panel(DIMS + 500), Some(dim_level(BRIGHTNESS_START)));
         assert_eq!(app.deadline(DIMS + 500), Some(OFF), "dim until it goes off");
         app.tick(OFF);
         assert_eq!(app.panel(OFF), None);
@@ -10472,7 +10480,7 @@ mod tests {
         // The UI started long after boot; the idle clock begins at the
         // first tick, not at zero.
         app.tick(5_000_000);
-        assert_eq!(app.panel(5_000_000), Some(SLIDER_START));
+        assert_eq!(app.panel(5_000_000), Some(BRIGHTNESS_START));
         assert_eq!(app.deadline(5_000_000), Some(5_000_000 + DIMS));
         app.tick(5_000_000 + OFF);
         assert_eq!(app.panel(5_000_000 + OFF), None);
@@ -10494,12 +10502,12 @@ mod tests {
         let mut app = App::new(Screen::Home, W, H, PPD);
         app.tick(0);
         app.tick(DIMS);
-        assert_eq!(app.panel(DIMS + 500), Some(dim_level(SLIDER_START)));
+        assert_eq!(app.panel(DIMS + 500), Some(dim_level(BRIGHTNESS_START)));
         let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
         app.touch(Touch::Down(x, y), &f, DIMS + 600);
         app.touch(Touch::Up, &f, DIMS + 650);
         assert_eq!(app.screen(), Screen::Settings, "the tap counts");
-        assert_eq!(app.panel(DIMS + 800), Some(SLIDER_START), "back to full brightness");
+        assert_eq!(app.panel(DIMS + 800), Some(BRIGHTNESS_START), "back to full brightness");
         assert_eq!(app.deadline(DIMS + 800), Some(DIMS + 650 + DIMS), "the wait starts over");
     }
 
@@ -10510,7 +10518,7 @@ mod tests {
         let (x, y) = spot(&mut app, &f, &i, Action::Open(Screen::Settings));
         press(&mut app, Key::Power, 0);
         assert!(app.touch(Touch::Down(x, y), &f, 100).is_empty());
-        assert_eq!(app.panel(100), Some(SLIDER_START));
+        assert_eq!(app.panel(100), Some(BRIGHTNESS_START));
         assert!(app.touch(Touch::Move(x, y - 300.0), &f, 120).is_empty());
         assert!(app.touch(Touch::Up, &f, 140).is_empty());
         assert_eq!(app.screen(), Screen::Home, "the waking tap pressed nothing");
@@ -10589,7 +10597,7 @@ mod tests {
         assert_eq!(app.deadline(0), None);
         let day = 24 * 3600 * 1000;
         app.tick(day);
-        assert_eq!(app.panel(day), Some(SLIDER_START));
+        assert_eq!(app.panel(day), Some(BRIGHTNESS_START));
     }
 
     #[test]
