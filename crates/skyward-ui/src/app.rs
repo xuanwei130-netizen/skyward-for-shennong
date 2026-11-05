@@ -1792,6 +1792,12 @@ pub enum Effect {
     Screenshot { storage: bool },
     /// Offer internal storage to a computer over USB, or stop.
     FileTransfer(bool),
+    /// Give the USB port to a drive plugged into it as its host, so what is
+    /// on the drive shows, or back as the device the recovery's own adb and
+    /// file transfer need. A drive is enumerated, and so found at all, only
+    /// while the port is its host, so the pages about a drive ask for the
+    /// port before any drive shows.
+    UsbHost(bool),
     /// Start receiving a package over USB.
     Sideload,
     /// Start installing the file at this path from the top of a place,
@@ -2368,6 +2374,15 @@ fn keyboard_strip(t: &Theme, frame: &Frame) -> (Canvas, i32) {
     let mut strip = Canvas::new(frame.canvas.w, (frame.canvas.h as i32 - top).max(0) as u32);
     strip.put_rows(&frame.canvas, top, frame.canvas.h as i32, 0);
     (strip, top)
+}
+
+/// Whether `screen` is a page about the drive plugged into the port: the
+/// one that shows what is on a drive, and the ones that choose a place to
+/// back up to or a backup to restore from, which look for drives. A drive
+/// is found only while the port is its host, so these pages hold the port,
+/// and the recovery's own adb and file transfer wait until they go.
+fn drive_page(screen: Screen) -> bool {
+    matches!(screen, Screen::Choose(Place::UsbDrive) | Screen::Backup | Screen::Restore)
 }
 
 pub struct App {
@@ -3619,9 +3634,16 @@ impl App {
         if drive == self.state.usb_drive {
             return Vec::new();
         }
+        let plugged = drive.is_some();
         self.state.usb_drive = drive;
         self.state.drive = Folder::new("");
         self.refresh();
+        // A drive pulled out while no page about one is up leaves the port
+        // as the device the recovery's own adb and file transfer need: with
+        // nothing on the port to read, holding it as the drive's host only
+        // keeps them waiting. A page about a drive keeps the port, so that
+        // one plugged back into it is found without opening the page again.
+        let unheld = !plugged && !drive_page(self.screen());
         let gone = !self.state.place_open(Place::UsbDrive) && self.state.restore.as_ref().is_some_and(|(e, _)| e.place == Place::UsbDrive);
         match self.screen() {
             Screen::RestoreBackup if gone => {
@@ -3631,14 +3653,19 @@ impl App {
                 self.leave(true);
                 self.stack.pop();
                 self.settle_page();
-                return vec![self.find_backups()];
+                let mut fx = Vec::new();
+                if unheld {
+                    fx.push(Effect::UsbHost(false));
+                }
+                fx.push(self.find_backups());
+                return fx;
             }
             Screen::Restore => return vec![self.find_backups()],
             _ => {}
         }
         let page = Screen::Choose(Place::UsbDrive);
         if self.screen() != page {
-            return Vec::new();
+            return if unheld { vec![Effect::UsbHost(false)] } else { Vec::new() };
         }
         *self.top_mut() = (page, 0.0, Focus::Unset);
         self.fling = None;
@@ -4510,6 +4537,16 @@ impl App {
         self.state.confirm = 0.0;
         self.settle_page();
         self.refresh();
+        // A page about a drive holds the port as the drive's host; leaving
+        // it takes the port back for the recovery's own adb and file
+        // transfer, unless the page gives way to one about a drive too, or
+        // a drive is still plugged in: with one there, the pages about it
+        // go on reading it, and the port costs adb nothing, which a line to
+        // a computer is what it would take to use, and that line is the
+        // drive's own place.
+        if drive_page(left) && !drive_page(self.screen()) && self.state.usb_drive.is_none() {
+            fx.push(Effect::UsbHost(false));
+        }
         // Coming back to the list of backups looks for them again: one may
         // have been made, deleted or opened up to be read since. So does
         // coming back to the partitions after work on one, which may have
@@ -4670,7 +4707,14 @@ impl App {
                 } else {
                     self.open(s);
                 }
-                return self.arrive_at(s);
+                let mut fx = self.arrive_at(s);
+                // A page about a drive plugged into the port asks for the
+                // port before what it shows is read: a drive is enumerated,
+                // and so found at all, only while the port is its host.
+                if drive_page(s) {
+                    fx.insert(0, Effect::UsbHost(true));
+                }
+                return fx;
             }
             Action::OpenData => return self.open_data(),
             Action::Skip => {
@@ -8825,7 +8869,7 @@ mod tests {
     fn backups_found_are_listed_newest_first_and_those_unread_last() {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
-        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Restore)), vec![Effect::FindBackups { storage: false, usb: false }]);
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Restore)), vec![Effect::UsbHost(true), Effect::FindBackups { storage: false, usb: false }]);
         let unread = BackupEntry { place: Place::Storage, name: "20261021-150000".into(), held: Err("read backup.toml: not found".into()) };
         let (old, new) = (found(Place::UsbDrive, 1_792_000_000, [true; 4]), found(Place::Storage, 1_792_348_260, [true; 4]));
         app.set_backups(vec![unread.clone(), old.clone(), new.clone()]);
@@ -8912,10 +8956,10 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = App::new(Screen::Home, W, H, PPD);
         app.set_usb_drive(Some(UsbDrive::Shown));
-        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Restore)), vec![Effect::FindBackups { storage: false, usb: true }]);
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Restore)), vec![Effect::UsbHost(true), Effect::FindBackups { storage: false, usb: true }]);
         app.set_backups(vec![found(Place::UsbDrive, 1_792_348_260, [true; 4])]);
         tap(&mut app, &f, &i, Action::OpenBackup(0));
-        assert_eq!(app.set_usb_drive(None), vec![Effect::FindBackups { storage: false, usb: false }]);
+        assert_eq!(app.set_usb_drive(None), vec![Effect::UsbHost(false), Effect::FindBackups { storage: false, usb: false }], "with no page about a drive up, the port goes back to adb");
         assert_eq!((app.screen(), app.state.restore.clone()), (Screen::Restore, None));
         assert_eq!(app.set_usb_drive(Some(UsbDrive::Shown)), vec![Effect::FindBackups { storage: false, usb: true }], "one plugged in is looked in");
     }
@@ -9320,7 +9364,7 @@ mod tests {
         let (f, i) = (fonts(), info());
         let mut app = opened(Screen::Install, &f, &i);
         let page = Screen::Choose(Place::UsbDrive);
-        assert!(tap(&mut app, &f, &i, Action::Open(page)).is_empty(), "with no drive, nothing to read");
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(page)), vec![Effect::UsbHost(true)], "the port goes to the drive, which is the only way one is found");
         assert_eq!(app.screen(), page);
         assert!(app.frame(&f, &i).rows.is_none(), "the page waits for one");
         assert_eq!(app.set_usb_drive(Some(UsbDrive::Shown)), vec![Effect::ReadPlace(Place::UsbDrive, String::new())], "read once shown");
@@ -9335,11 +9379,23 @@ mod tests {
         assert!(app.set_usb_drive(None).is_empty());
         assert_eq!(app.state.drive.path, "", "a drive pulled out leaves nothing of its folders");
         assert!(app.frame(&f, &i).rows.is_none(), "the page waits for another");
-        assert!(app.key(Key::Back, 1000).is_empty());
+        assert_eq!(app.key(Key::Back, 1000), vec![Effect::UsbHost(false)], "leaving the page, the port goes back to adb and file transfer");
         assert_eq!(app.screen(), Screen::Install);
         let unreadable = Some(UsbDrive::Unreadable("sdg holds no filesystem the kernel reads".into()));
         assert!(app.set_usb_drive(unreadable).is_empty(), "another page reads nothing");
-        assert!(tap_at(&mut app, &f, &i, Action::Open(page), 1000).is_empty(), "nothing on the drive can be read");
+        assert_eq!(tap_at(&mut app, &f, &i, Action::Open(page), 1000), vec![Effect::UsbHost(true)], "the port goes to the drive, though what is on it cannot be read");
+    }
+
+    #[test]
+    fn a_drive_still_plugged_in_keeps_the_port_when_its_page_is_left() {
+        let (f, i) = (fonts(), info());
+        let mut app = opened(Screen::Install, &f, &i);
+        let page = Screen::Choose(Place::UsbDrive);
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(page)), vec![Effect::UsbHost(true)]);
+        assert_eq!(app.set_usb_drive(Some(UsbDrive::Shown)), vec![Effect::ReadPlace(Place::UsbDrive, String::new())]);
+        assert!(app.key(Key::Back, 1000).is_empty(), "the drive is still there, so the port stays its host");
+        assert_eq!(app.screen(), Screen::Install);
+        assert_eq!(app.set_usb_drive(None), vec![Effect::UsbHost(false)], "pulled out with no page about one up, the port goes back to adb");
     }
 
     #[test]

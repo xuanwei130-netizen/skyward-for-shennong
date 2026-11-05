@@ -1997,6 +1997,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         }
                         list_place(&mut app, place, folder)?
                     }
+                    // A drive is enumerated only while the port is its host,
+                    // so the pages about a drive ask for the port as they
+                    // open; the port goes back to the recovery's own adb and
+                    // file transfer when they go.
+                    Effect::UsbHost(host) => {
+                        if let Err(e) = host_port(host) {
+                            skyward_sys::kmsg(&format!("the USB port is left as it was: {e:#}"))?;
+                        }
+                    }
                     // A name taken where an entry goes is the user's to
                     // decide on before anything is written.
                     Effect::Paste { op, path, into, clash } => {
