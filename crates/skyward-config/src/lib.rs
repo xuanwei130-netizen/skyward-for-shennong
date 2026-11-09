@@ -17,6 +17,17 @@ pub mod ramdisk {
     pub const MONO_LICENSE: &str = "skyward/KirkMono-OFL.txt";
     /// The recovery service binary init starts.
     pub const RECOVERY: &str = "system/bin/recovery";
+    /// The first program of a system installed beside the installed one,
+    /// which Skyward puts in that system's init_boot image: linked
+    /// statically, since it runs before any system's libraries are there.
+    pub const SYSTEM_INIT: &str = "skyward/system-init";
+    /// The commands install scripts written for other recoveries run that
+    /// Skyward answers itself: 7za, avbctl, resetprop and zstd, which a
+    /// stock recovery does not carry, and unzip, whose stock version holds
+    /// all that `-p` takes out in memory. Each is a link to the recovery
+    /// service binary beside it, which runs the command it is started as.
+    pub const COMMANDS: [&str; 5] =
+        ["system/bin/7za", "system/bin/avbctl", "system/bin/resetprop", "system/bin/unzip", "system/bin/zstd"];
     /// The first property file init loads in recovery mode.
     pub const PROP_DEFAULT: &str = "prop.default";
     /// The scheduling profiles libprocessgroup reads.
@@ -190,9 +201,10 @@ pub struct Wipe {
 /// The data partition, which the folders erasing takes in are in.
 const DATA: &str = "/data";
 
-/// The vibration motor's click, played through the kernel's force-feedback
-/// events: a waveform its driver keeps, or one made from samples at the
-/// motor's resonant frequency, which the driver plays as they are given.
+/// The vibration motor, played through the kernel's force-feedback events:
+/// its click, a waveform its driver keeps or one made from samples at the
+/// motor's resonant frequency, which the driver plays as they are given,
+/// and the ticks of the screen going off by the power key, made too.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Haptics {
     /// The driver's number for a click waveform it keeps, on phones whose
@@ -200,10 +212,8 @@ pub struct Haptics {
     #[serde(default)]
     pub click: Option<i16>,
     /// The file the driver says the motor's resonant frequency in, in
-    /// tenths of a hertz whatever its label, on phones whose click is made
-    /// from samples.
-    #[serde(default)]
-    pub resonance: Option<String>,
+    /// tenths of a hertz whatever its label.
+    pub resonance: String,
     pub strength: Strength,
     /// How many whole swings drive a made click, by default two. A motor
     /// that bottoms out and bangs on its stops at full swing can be driven
@@ -516,6 +526,22 @@ fn default_module_sources() -> Vec<String> {
     vec!["vendor_boot".into(), "vendor_dlkm".into(), "vendor".into()]
 }
 
+/// The phone a device configuration is for, read on its own: the
+/// configuration a newer build of Skyward carries may hold what this build
+/// does not read.
+pub fn codename(text: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Named {
+        device: NamedDevice,
+    }
+    #[derive(Deserialize)]
+    struct NamedDevice {
+        codename: String,
+    }
+    let named: Named = toml::from_str(text).context("parse device config")?;
+    Ok(named.device.codename)
+}
+
 impl DeviceConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let p = path.as_ref();
@@ -577,13 +603,8 @@ impl DeviceConfig {
             ensure!(plain && !folder.is_empty(), "[backup] data_skipped: {folder} is not a path from the top of {DATA}");
         }
         if let Some(haptics) = &cfg.haptics {
-            ensure!(
-                haptics.click.is_some() != haptics.resonance.is_some(),
-                "[haptics] names either a waveform the driver keeps or the file it says the motor's resonant frequency in"
-            );
-            if let Some(file) = &haptics.resonance {
-                ensure!(Path::new(file).is_absolute(), "[haptics] resonance: {file} is not an absolute path");
-            }
+            let file = &haptics.resonance;
+            ensure!(Path::new(file).is_absolute(), "[haptics] resonance: {file} is not an absolute path");
             let Strength { lightest, strongest } = haptics.strength;
             ensure!(
                 0.0 < lightest && lightest < strongest && strongest <= 1.0,
@@ -663,6 +684,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_commands_sit_beside_the_recovery_service_binary() {
+        let folder = |path: &str| Path::new(path).parent().map(Path::to_path_buf);
+        for command in ramdisk::COMMANDS {
+            assert_eq!(folder(command), folder(ramdisk::RECOVERY), "{command}");
+        }
+    }
+
+    #[test]
     fn parses_minimal() {
         let cfg = DeviceConfig::parse("[device]\ncodename = \"nezha\"\n").unwrap();
         assert_eq!(cfg.device.codename, "nezha");
@@ -677,15 +706,14 @@ mod tests {
     #[test]
     fn a_click_is_kept_or_made_and_its_strengths_rise() {
         let with = |body: &str| DeviceConfig::parse(&format!("[device]\ncodename = \"x\"\n[haptics]\n{body}\n"));
-        let strength = "strength = { lightest = 0.25, strongest = 1.0 }";
-        assert!(with(&format!("click = 0\n{strength}")).is_ok());
-        assert!(with(&format!("resonance = \"/sys/class/qcom-haptics/lra_frequency_hz\"\n{strength}")).is_ok());
-        assert!(with(strength).is_err(), "a click of neither kind");
-        assert!(with(&format!("click = 0\nresonance = \"/sys/f\"\n{strength}")).is_err(), "a click of both kinds");
+        let (strength, resonance) = ("strength = { lightest = 0.25, strongest = 1.0 }", "resonance = \"/sys/class/qcom-haptics/lra_frequency_hz\"");
+        assert!(with(&format!("{resonance}\n{strength}")).is_ok(), "a click made");
+        assert!(with(&format!("click = 0\n{resonance}\n{strength}")).is_ok(), "a click kept");
+        assert!(with(&format!("click = 0\n{strength}")).is_err(), "no motor's resonance to make the ticks at");
         assert!(with(&format!("resonance = \"sys/f\"\n{strength}")).is_err(), "a file named from nowhere");
-        assert!(with("click = 0").is_err(), "a click without its strengths");
+        assert!(with(resonance).is_err(), "a click without its strengths");
         for (lightest, strongest) in [(0.0, 0.5), (0.5, 0.5), (0.5, 0.25), (0.25, 1.5)] {
-            let s = format!("click = 0\nstrength = {{ lightest = {lightest:?}, strongest = {strongest:?} }}");
+            let s = format!("{resonance}\nstrength = {{ lightest = {lightest:?}, strongest = {strongest:?} }}");
             assert!(with(&s).is_err(), "{lightest} to {strongest} is refused");
         }
     }
@@ -811,6 +839,15 @@ mod tests {
         assert!(with("by-name/persist").is_err());
         assert!(with("").is_err());
         assert!(DeviceConfig::parse("[device]\ncodename = \"x\"\n").unwrap().partitions.mounted.is_empty(), "a phone may need none");
+    }
+
+    #[test]
+    fn the_phone_is_read_from_a_configuration_this_build_cannot_read_whole() {
+        assert_eq!(codename(include_str!("../../../devices/shennong.toml")).unwrap(), "shennong");
+        let later = "[device]\ncodename = \"x\"\nab = \"no longer a switch\"\n[display]\nwidth = \"wide\"\n[aurora]\nnew = 1\n";
+        assert!(DeviceConfig::parse(later).is_err());
+        assert_eq!(codename(later).unwrap(), "x");
+        assert!(codename("[display]\nwidth = 1440\n").is_err(), "a configuration that names no phone");
     }
 
     #[test]

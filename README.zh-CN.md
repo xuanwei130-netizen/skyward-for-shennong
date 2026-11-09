@@ -16,9 +16,11 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 
 ## 功能
 
+- 双系统：在已装的系统之外安装第二个系统，并在两者之间切换；做法见上游的 [How dual boot works](https://github.com/kirklin/skyward#how-dual-boot-works)
 - 解密 data 分区（方案由酷安 @就会叫姐姐 提供，见[致谢](#致谢)）
 - 安装刷机包、系统更新包和分区镜像，支持内部存储、U 盘和 adb sideload
-- 在线系统更新
+- 安装脚本提供 `7za`、`zstd`、`-p` 流式解压的 `unzip`、`avbctl` 和 `resetprop`
+- 在线系统更新，包括 Skyward 自身
 - 备份和恢复
 - 清除数据、恢复出厂设置
 - 挂载分区，修复和格式化文件系统
@@ -46,12 +48,12 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 Skyward 需要已解锁的 bootloader。从 [Releases](https://github.com/xuanwei130-netizen/skyward-for-shennong/releases) 下载对应的 zip。使用 `SHA256SUMS` 核对并解压之后，在手机处于 fastboot 模式的时候，把其中的镜像刷入当前运行槽位的 recovery 分区：
 
 ```sh
-unzip skyward-v0.1.2-shennong.1-shennong-OS3.0.309.0.WNBCNXM.zip
-fastboot flash recovery skyward-v0.1.2-shennong.1-shennong-OS3.0.309.0.WNBCNXM.img
+unzip skyward-v0.2.0-shennong.1-shennong-OS3.0.309.0.WNBCNXM.zip
+fastboot flash recovery skyward-v0.2.0-shennong.1-shennong-OS3.0.309.0.WNBCNXM.img
 fastboot reboot recovery
 ```
 
-之后可以在 Skyward 自己的“安装”页面安装解压出来的新版镜像。打开 **自动重新刷入 Skyward** 之后，系统更新或者刷机包覆盖 recovery 分区的时候，Skyward 会重新刷回这些分区。
+之后 Skyward 会在设置的“Skyward 更新”页面通过 Wi-Fi 从最新版本自我更新；解压出来的新版镜像也可以在它自己的“安装”页面安装。打开 **自动重新刷入 Skyward** 之后，系统更新或者刷机包覆盖 recovery 分区的时候，Skyward 会重新刷回这些分区。
 
 super 中没有系统的时候，Skyward 仍然可以启动：屏幕和按键、adb、`adb sideload` 和 fastbootd 都能使用，足够装回一个系统。触摸、WLAN 和解密依赖已安装系统中的程序，系统装回之后随之恢复。
 
@@ -70,6 +72,12 @@ cargo ndk -t arm64-v8a --platform 30 build --release -p skyward
 cargo build --release -p skyward-pack
 ```
 
+第二个系统的第一个程序在任何库可以加载之前运行，所以构建成静态程序：
+
+```sh
+RUSTFLAGS="-C target-feature=+crt-static" cargo ndk -t arm64-v8a --platform 30 build --release -p skyward-system-init --target-dir target/system-init
+```
+
 打包工具从小米服务器上这个版本的完整更新包中取出原厂 recovery 分区，只读取这个分区所在的部分，并且按照设备配置文件核对 SHA-256：
 
 ```sh
@@ -82,6 +90,7 @@ target/release/skyward-pack stock --config devices/shennong.toml --out target/st
 target/release/skyward-pack recovery \
   --stock target/stock/shennong/recovery.img \
   --binary target/aarch64-linux-android/release/skyward \
+  --system-init target/system-init/aarch64-linux-android/release/system-init \
   --config devices/shennong.toml \
   --font resources/fonts/MiSansVF.ttf \
   --mono resources/fonts/KirkMono-Regular.ttf \
@@ -94,7 +103,7 @@ target/release/skyward-pack recovery \
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo ndk -t arm64-v8a --platform 30 clippy -p skyward -p skyward-install -- -D warnings
+cargo ndk -t arm64-v8a --platform 30 clippy -p skyward -p skyward-install -p skyward-systems -p skyward-system-init -- -D warnings
 ```
 
 `skyward-preview` 无需手机，在电脑上把页面绘制成 PNG 文件：每个页面完整绘制成长截图的样子，覆盖它可能处于的各种状态，另外还有触摸和动画过程中某些时刻的屏幕。`--lang` 按照地区代码选择语言，例如 `en` 或者 `zh-TW`：

@@ -18,10 +18,13 @@ partition mounting fixes of this branch.
 
 ## Features
 
+- Dual boot: install a second system beside the installed one and switch between
+  them; see [How dual boot works](https://github.com/kirklin/skyward#how-dual-boot-works)
 - Decrypt the data partition (the scheme is provided by @就会叫姐姐 on Coolapk, see
   [Acknowledgements](#acknowledgements))
 - Install zips, system update packages and partition images, from internal storage, a USB drive or adb sideload
-- Online system updates
+- Install scripts get `7za`, `zstd`, an `unzip` whose `-p` streams, `avbctl` and `resetprop`
+- Online system updates, Skyward's own included
 - Backup and restore
 - Wipe data and factory reset
 - Mount partitions, repair and format filesystems
@@ -55,14 +58,15 @@ recovery partition of the slot the phone runs from, with the phone in fastboot
 mode:
 
 ```sh
-unzip skyward-v0.1.2-shennong.1-shennong-OS3.0.309.0.WNBCNXM.zip
-fastboot flash recovery skyward-v0.1.2-shennong.1-shennong-OS3.0.309.0.WNBCNXM.img
+unzip skyward-v0.2.0-shennong.1-shennong-OS3.0.309.0.WNBCNXM.zip
+fastboot flash recovery skyward-v0.2.0-shennong.1-shennong-OS3.0.309.0.WNBCNXM.img
 fastboot reboot recovery
 ```
 
-Afterwards a newer image, unzipped, installs from Skyward's own Install page. With
-**Flash Skyward again** on, a system update or zip that writes over the recovery
-partitions gets Skyward back in them.
+Afterwards Skyward updates itself over Wi-Fi from its newest release, on the
+Skyward update page in Settings; a newer image, unzipped, also installs from its own
+Install page. With **Flash Skyward again** on, a system update or zip that writes
+over the recovery partitions gets Skyward back in them.
 
 Without a system in super, Skyward still starts, with its screen and keys, adb,
 `adb sideload` and fastbootd, enough to install one. Touch, WLAN and decryption run
@@ -88,6 +92,13 @@ cargo ndk -t arm64-v8a --platform 30 build --release -p skyward
 cargo build --release -p skyward-pack
 ```
 
+The second system's first program runs before any library is there to load, so it
+is built as a static program:
+
+```sh
+RUSTFLAGS="-C target-feature=+crt-static" cargo ndk -t arm64-v8a --platform 30 build --release -p skyward-system-init --target-dir target/system-init
+```
+
 The packer takes the stock recovery partition out of the build's full update
 package on Xiaomi's server, reading only the part of the package the partition is
 in, and checks its SHA-256 against the device file:
@@ -102,6 +113,7 @@ Then it builds the image on top of it:
 target/release/skyward-pack recovery \
   --stock target/stock/shennong/recovery.img \
   --binary target/aarch64-linux-android/release/skyward \
+  --system-init target/system-init/aarch64-linux-android/release/system-init \
   --config devices/shennong.toml \
   --font resources/fonts/MiSansVF.ttf \
   --mono resources/fonts/KirkMono-Regular.ttf \
@@ -114,7 +126,7 @@ Tests and lints run on the computer; what runs only on the phone is linted for i
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo ndk -t arm64-v8a --platform 30 clippy -p skyward -p skyward-install -- -D warnings
+cargo ndk -t arm64-v8a --platform 30 clippy -p skyward -p skyward-install -p skyward-systems -p skyward-system-init -- -D warnings
 ```
 
 `skyward-preview` draws the pages on the computer, as PNG files, without a phone:
