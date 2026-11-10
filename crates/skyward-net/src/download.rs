@@ -98,6 +98,7 @@ pub fn free(dir: &Path) -> Result<u64> {
     if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
         return Err(std::io::Error::last_os_error()).with_context(|| format!("read the free space of {}", dir.display()));
     }
+    #[allow(clippy::unnecessary_cast, reason = "statvfs's fields are c_ulong, u64 on Linux and u32 on Android")]
     Ok(s.f_bavail as u64 * s.f_frsize as u64)
 }
 

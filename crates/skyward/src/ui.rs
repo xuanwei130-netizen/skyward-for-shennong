@@ -29,6 +29,7 @@ use skyward_files::Ownership;
 use skyward_block::usb::{self, Drive};
 use skyward_net::download::{self, Failure};
 use skyward_net::http::Servers;
+use skyward_net::localsend::{self, Config as LocalSendConfig, Status as LocalSendStatus};
 use skyward_net::release::{Installed, Release, Unanswered};
 use skyward_net::wlan::{Power as WlanPower, Stage as Joining, Wlan};
 use skyward_sys::sleep::{Sleeper, Slept};
@@ -1384,6 +1385,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         None => None,
     };
+    // The LocalSend endpoint, started from its page once a WLAN is joined.
+    // It runs until its switch is turned off or the recovery leaves the
+    // screen; dropping it stops its listener, announcer and watcher.
+    let mut local_send: Option<localsend::Worker> = None;
     let mut scanned_at = Instant::now();
     app.state.update_server = cfg.update.is_some();
     // Asking the update server, and downloading the full package.
@@ -1470,6 +1475,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             port_at = Instant::now();
         }
         let panel = app.panel(now);
+        // A double tap that lights a dark panel needs its touch controller
+        // to keep reporting. Xiaomi's rests with the panel, so while the
+        // gesture is offered a dark panel is left powered, showing a black
+        // frame at zero backlight, and the phone is not let suspend.
+        let keep_touch = app.double_tap_wake() && !app.display_on();
         let mut shown = false;
         if panel.is_some() {
             // A display turned off comes on again with a frame drawn for it.
@@ -1504,6 +1514,16 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             // Lit, a panel that came on again switches to its fastest
             // refresh.
             surface.speed_up()?;
+            rested_at = None;
+        } else if keep_touch {
+            // The panel stays powered so its touch controller keeps
+            // reporting taps. Should the gesture have been turned on after
+            // the panel had already rested or gone off, one black frame
+            // turns it back on without lighting the backlight.
+            if !surface.is_on() {
+                screen.data.fill(0);
+                surface.present(&screen)?;
+            }
             rested_at = None;
         } else if surface.is_on() {
             // With the backlight off, the panel rests, and the touch
@@ -1545,6 +1565,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             || downloader.is_some()
             || skyward_checker.is_some()
             || skyward_updater.is_some()
+            || local_send.is_some()
             || systems_busy;
         let joining = app.state.wlan.as_ref().and_then(|w| w.joined.as_ref()).is_some_and(|j| matches!(j.stage, Joining::Joining | Joining::Addressing));
         let running = match &shell {
@@ -1560,7 +1581,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             && !running
             && asked.is_none()
             && usb_link()? != UsbLink::Connected;
-        sleeper.allow(may_sleep);
+        // A double tap needs the CPU awake to hear the panel's taps, so
+        // offering the gesture keeps the phone out of suspend while dark.
+        sleeper.allow(may_sleep && !keep_touch);
         let mut fds = vec![inputs.fd(), uevents.fd(), sleeper.fd()];
         if let Some(i) = &installer {
             fds.push(i.fd());
@@ -1593,6 +1616,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             fds.push(p.fd());
         }
         if let Some(w) = &wlan {
+            fds.push(w.fd());
+        }
+        if let Some(w) = &local_send {
             fds.push(w.fd());
         }
         if let Some(c) = &checker {
@@ -1942,6 +1968,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             if let Some(t) = traffic {
                 app.set_traffic(t);
             }
+        }
+        // The LocalSend page follows the endpoint the same way: its worker
+        // wakes the poll whenever a peer, a file or the phase changes.
+        if let Some(status) = local_send.as_ref().and_then(|w| w.told()) {
+            app.set_local_send(status);
         }
         // The WLAN page scans again now and then while it shows, as the
         // stock settings do.
@@ -2513,6 +2544,69 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         wlan_worker(&wlan)?.send(wlan::Command::Join { ssid, name, security, password: password.0 })
                     }
                     Effect::LeaveWlan => wlan_worker(&wlan)?.send(wlan::Command::Leave),
+                    Effect::LocalSend(on) => {
+                        if !on {
+                            local_send = None;
+                            app.set_local_send(LocalSendStatus { phase: localsend::Phase::Off, ..Default::default() });
+                        } else if local_send.is_none() {
+                            // Announcing and binding need the address the
+                            // joined network gave, which only the runtime
+                            // holds. Without one, say so on the page.
+                            let address = app
+                                .state
+                                .wlan
+                                .as_ref()
+                                .and_then(|w| w.joined.as_ref())
+                                .and_then(|j| match &j.stage {
+                                    Joining::Connected(link) => Some(link.address),
+                                    _ => None,
+                                });
+                            match address {
+                                None => {
+                                    let why = app.state.lang.pick([
+                                        "请先连接 WLAN，再开启 LocalSend。",
+                                        "請先連線 Wi-Fi，再開啟 LocalSend。",
+                                        "Join a Wi-Fi network before turning LocalSend on.",
+                                    ]);
+                                    skyward_sys::kmsg("LocalSend needs the address a joined WLAN gives")?;
+                                    app.set_local_send(LocalSendStatus {
+                                        phase: localsend::Phase::Failed,
+                                        error: Some(why.to_string()),
+                                        ..Default::default()
+                                    });
+                                }
+                                Some(address) => {
+                                    // Files go to internal storage where it
+                                    // is open, so a package sent over can be
+                                    // installed straight away; otherwise to
+                                    // the recovery's own writable folder.
+                                    let directory = if app.state.data.storage_open() {
+                                        PathBuf::from(skyward_crypto::data::SDCARD).join("LocalSend")
+                                    } else {
+                                        PathBuf::from(skyward_sys::RUN).join("localsend")
+                                    };
+                                    let cfg = LocalSendConfig {
+                                        alias: format!("Skyward ({})", info.codename),
+                                        model: info.model.clone(),
+                                        address,
+                                        directory,
+                                        port: localsend::PORT,
+                                    };
+                                    match localsend::Worker::start(cfg) {
+                                        Ok(w) => local_send = Some(w),
+                                        Err(e) => {
+                                            skyward_sys::kmsg(&format!("LocalSend did not start: {e:#}"))?;
+                                            app.set_local_send(LocalSendStatus {
+                                                phase: localsend::Phase::Failed,
+                                                error: Some(format!("{e:#}")),
+                                                ..Default::default()
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // What the installed system is called is the page's to
                     // report when it cannot be read.
                     Effect::CheckUpdate => {

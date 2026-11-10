@@ -49,6 +49,8 @@ pub struct Settings {
     pub vibration: f32,
     /// A computer connected over USB is offered internal storage.
     pub file_transfer: bool,
+    /// A double tap on the dark panel lights it.
+    pub double_tap: bool,
     pub install: Install,
     pub backup: Backup,
     pub logs: Logs,
@@ -126,6 +128,7 @@ impl Settings {
             vibrate: state.vibrate,
             vibration: state.vibration,
             file_transfer: state.file_transfer,
+            double_tap: state.double_tap,
             install: Install { check_signature: state.check_signature, keep_recovery: state.keep_recovery },
             backup: Backup {
                 parts: names(&state.backup, &PARTS),
@@ -184,6 +187,7 @@ impl Settings {
             state.vibration = self.vibration;
         }
         state.file_transfer = self.file_transfer;
+        state.double_tap = self.double_tap;
         state.check_signature = self.install.check_signature;
         state.keep_recovery = self.install.keep_recovery;
         state.backup = picked(&self.backup.parts, &PARTS);
@@ -295,6 +299,25 @@ impl Keeper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_without_the_double_tap_setting_keeps_the_gesture_on() {
+        let kept = Settings::read(r#"{ "dark": true }"#).unwrap();
+        assert!(kept.double_tap, "an older file starts with the gesture on");
+        let mut state = State::default();
+        kept.apply(&mut state);
+        assert!(state.double_tap);
+    }
+
+    #[test]
+    fn turning_the_double_tap_off_goes_round_through_the_file() {
+        let state = State { double_tap: false, ..State::default() };
+        let kept = Settings::read(&Settings::of(&state).text()).unwrap();
+        assert!(!kept.double_tap);
+        let mut back = State::default();
+        kept.apply(&mut back);
+        assert!(!back.double_tap);
+    }
 
     #[test]
     fn the_settings_go_round_through_their_file() {
