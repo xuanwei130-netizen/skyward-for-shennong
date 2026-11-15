@@ -31,6 +31,9 @@ pub fn gaussian(src: &Canvas) -> Canvas {
 
 /// Average each `SCALE` x `SCALE` block into one pixel. This is a downsample,
 /// not the blur: the Gaussian follows on the small image.
+// The divisor is checked on the line above; a newer clippy asks for
+// checked_div here, which would only say the same thing less clearly.
+#[allow(clippy::manual_checked_ops)]
 fn downsample(src: &Canvas, w: u32, h: u32) -> Vec<Rgb> {
     let mut out = vec![[0u8; 3]; (w * h) as usize];
     for sy in 0..h {

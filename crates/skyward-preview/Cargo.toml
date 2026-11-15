@@ -18,6 +18,7 @@ skyward-config = { path = "../skyward-config" }
 skyward-info = { path = "../skyward-info" }
 skyward-install = { path = "../skyward-install" }
 skyward-net = { path = "../skyward-net" }
+skyward-rescue = { path = "../skyward-rescue" }
 skyward-systems = { path = "../skyward-systems" }
 skyward-ui = { path = "../skyward-ui" }
 skyward-vab = { path = "../skyward-vab" }

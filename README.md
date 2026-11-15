@@ -29,6 +29,7 @@ partition mounting fixes of this branch.
 - Wipe data and factory reset
 - Mount partitions, repair and format filesystems
 - File manager and terminal
+- Rescue: walk a phone that will not start for its pictures (camera raw files and live photos included), films and documents, and take a chat app's folder out whole
 - WLAN
 - MTP file transfer, adb and fastbootd
 - Reboot to system, recovery, fastboot, bootloader or EDL, and switch slots
@@ -58,8 +59,8 @@ recovery partition of the slot the phone runs from, with the phone in fastboot
 mode:
 
 ```sh
-unzip skyward-v0.2.0-shennong.1-shennong-OS3.0.309.0.WNBCNXM.zip
-fastboot flash recovery skyward-v0.2.0-shennong.1-shennong-OS3.0.309.0.WNBCNXM.img
+unzip skyward-v0.3.1-shennong.3-shennong-OS3.0.309.0.WNBCNXM.zip
+fastboot flash recovery skyward-v0.3.1-shennong.3-shennong-OS3.0.309.0.WNBCNXM.img
 fastboot reboot recovery
 ```
 

@@ -56,6 +56,8 @@ pub enum Icon {
     Folder,
     /// A page with three lines of text cut out of it.
     Log,
+    /// A frame with a play mark cut out of it, as a film shows in a list.
+    Film,
     /// A shield with a tick, as the stock Settings' security status shows
     /// it.
     Shield,
@@ -312,6 +314,12 @@ const LOG: &[Part] = &[
     cut(Shape::Line("M10.6,17.8H14.6", 1.8)),
 ];
 
+const FILM: &[Part] = &[add(Shape::EvenOdd(
+    "M7.3,6.2H20.7A2.4,2.4 0 0 1 23.1,8.6V19.4A2.4,2.4 0 0 1 20.7,21.8H7.3A2.4,2.4 0 0 1 4.9,19.4V8.6\
+     A2.4,2.4 0 0 1 7.3,6.2Z\
+     M12.15,10.75L18,14L12.15,17.25Z",
+))];
+
 const SHIELD: &[Part] = &[add(Shape::EvenOdd(
     "M14.27,5.155C14.471,5.189 14.665,5.274 15.053,5.443L19.325,7.312C20.214,7.7 20.658,7.895 20.981,8.212C21.264,8.489 21.481,8.841 21.602,9.217\
      C21.741,9.648 21.716,10.125 21.666,11.08C21.587,12.58 21.477,14.392 21.352,15.635C21.117,17.962 18.831,20.601 14.838,22.604\
@@ -367,6 +375,7 @@ fn outline(icon: Icon) -> (&'static [Part], f32) {
         Icon::More => (MORE, 1.0),
         Icon::Folder => (FOLDER, FOLDER_SCALE),
         Icon::Log => (LOG, 1.0),
+        Icon::Film => (FILM, 1.0),
         Icon::Shield => (SHIELD, 1.0),
         Icon::Wlan => (WLAN, 1.0),
         Icon::Battery => (BATTERY, 1.0),
@@ -500,7 +509,7 @@ fn path(d: &str) -> tiny_skia::Path {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 22] = [
+    const ALL: [Icon; 23] = [
         Icon::Install,
         Icon::Backup,
         Icon::Restore,
@@ -519,6 +528,7 @@ mod tests {
         Icon::More,
         Icon::Folder,
         Icon::Log,
+        Icon::Film,
         Icon::Shield,
         Icon::Wlan,
         Icon::Battery,

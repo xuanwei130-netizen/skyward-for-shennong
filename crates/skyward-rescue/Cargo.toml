@@ -1,0 +1,12 @@
+[package]
+name = "skyward-rescue"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+# What is copied out is given the owner and the label of the folder it goes
+# into, as shared storage needs: a file left owned by root is one the
+# system cannot read.
+skyward-files = { path = "../skyward-files" }

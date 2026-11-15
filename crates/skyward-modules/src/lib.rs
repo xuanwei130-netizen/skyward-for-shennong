@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub mod manage;
 pub mod modprobe;
 
 /// Where a module source's files are in the recovery: the vendor_boot

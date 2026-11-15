@@ -11,6 +11,7 @@ use skyward_net::iface;
 use skyward_net::reach::{self, Reach};
 use skyward_net::supplicant::{self, Bss, Control, Event as Told, Security};
 use skyward_net::wlan::{self, Joined, Link, Next, Power, Stage, Traffic, Wlan};
+use std::collections::BTreeSet;
 use std::fs;
 use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -58,6 +59,25 @@ const TRAFFIC: Duration = Duration::from_secs(1);
 /// How long after the network gave no address it is asked again.
 const RETRY: Duration = Duration::from_secs(10);
 
+/// A network the recovery joined before, kept so the WLAN can join it
+/// again without a password being typed. The SSID is kept as bytes: a
+/// network's name need not be text the pages can show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub ssid: Vec<u8>,
+    pub name: String,
+    pub security: Security,
+    pub password: String,
+}
+
+/// Whether the WLAN joins remembered networks by itself, and which ones.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Auto {
+    pub enabled: bool,
+    /// Most recently joined first.
+    pub saved: Vec<Saved>,
+}
+
 /// What the screen asks of the WLAN.
 pub enum Command {
     On,
@@ -65,6 +85,9 @@ pub enum Command {
     Scan,
     Join { ssid: Vec<u8>, name: String, security: Security, password: String },
     Leave,
+    /// The remembered networks, or whether they are joined on their own,
+    /// have changed on the settings page.
+    Auto(Auto),
 }
 
 /// What comes to the thread: a command, how asking for an address went,
@@ -119,9 +142,10 @@ fn drain(fd: &OwnedFd) {
 impl Worker {
     /// Start the thread, with the WLAN off. `modules` are the folders the
     /// driver's modules are found in, `libraries` the bundle of the vendor
-    /// interface's libraries, and `servers` where the DNS servers the
-    /// network gives are kept for whoever looks names up.
-    pub fn start(cfg: Config, modules: Vec<PathBuf>, libraries: Option<PathBuf>, servers: Servers) -> Result<Worker> {
+    /// interface's libraries, `servers` where the DNS servers the network
+    /// gives are kept for whoever looks names up, and `auto` the networks
+    /// the WLAN may join by itself.
+    pub fn start(cfg: Config, modules: Vec<PathBuf>, libraries: Option<PathBuf>, servers: Servers, auto: Auto) -> Result<Worker> {
         let (inbox_tx, inbox) = mpsc::channel();
         let (poked, poke) = pipe()?;
         let (told_tx, told) = mpsc::channel();
@@ -137,7 +161,10 @@ impl Worker {
                     let _ = told_tx.send(r);
                     signal(&rung);
                 };
-                let mut s = Station { cfg, modules, libraries, servers, state: Wlan::default(), running: None, back, tell: Box::new(tell) };
+                let mut s = Station {
+                    cfg, modules, libraries, servers, state: Wlan::default(), running: None, back,
+                    tell: Box::new(tell), auto, auto_tried: BTreeSet::new(),
+                };
                 s.run(&inbox, &poked);
             })
             .context("start the WLAN thread")?;
@@ -244,6 +271,11 @@ struct Station {
     servers: Servers,
     state: Wlan,
     running: Option<Running>,
+    /// The networks the WLAN may join by itself, and those it has already
+    /// tried since it was last brought up, so a wrong password does not
+    /// make it try the same one on every scan.
+    auto: Auto,
+    auto_tried: BTreeSet<Vec<u8>>,
     back: Back,
     tell: Box<dyn Fn(Report) + Send>,
 }
@@ -318,6 +350,14 @@ impl Station {
                 }
                 self.state.joined = None;
             }
+            Command::Auto(auto) => {
+                self.auto = auto;
+                self.auto_tried.clear();
+                // A network newly remembered may already be in range.
+                if self.running.is_some() {
+                    self.try_auto();
+                }
+            }
         }
     }
 
@@ -331,6 +371,7 @@ impl Station {
             Ok(r) => {
                 self.running = Some(r);
                 self.state.power = Power::On;
+                self.auto_tried.clear();
                 self.command(Command::Scan);
             }
             Err(e) => {
@@ -384,6 +425,7 @@ impl Station {
             let _ = skyward_sys::kmsg(&format!("{e:#}"));
         }
         self.state = Wlan::default();
+        self.auto_tried.clear();
     }
 
     /// The supplicant no longer answers: the WLAN is off, and why is said.
@@ -429,18 +471,53 @@ impl Station {
     }
 
     fn read_scan(&mut self) -> Result<()> {
-        let r = self.running.as_mut().expect("scan results come from a supplicant running");
-        let mut found = Vec::new();
-        let mut first = 0;
-        loop {
-            let page = supplicant::bss_list(&r.control.ask(&supplicant::bss_command(first))?)?;
-            let Some(last) = page.last() else { break };
-            first = last.id + 1;
-            found.extend(page);
+        {
+            let r = self.running.as_mut().expect("scan results come from a supplicant running");
+            let mut found = Vec::new();
+            let mut first = 0;
+            loop {
+                let page = supplicant::bss_list(&r.control.ask(&supplicant::bss_command(first))?)?;
+                let Some(last) = page.last() else { break };
+                first = last.id + 1;
+                found.extend(page);
+            }
+            self.state.networks = wlan::networks(&found);
+            r.found = found;
         }
-        self.state.networks = wlan::networks(&found);
-        r.found = found;
+        // With the networks in range read, one the recovery remembers may
+        // be among them. It is joined without waiting to be asked.
+        self.try_auto();
         Ok(())
+    }
+
+    /// Join the strongest remembered network in range, once per network
+    /// and per time the WLAN is brought up. Networks joined by hand stand
+    /// first in the list, but any of them may be joined where the first
+    /// is not in range. A network already chosen by the user is left alone.
+    fn try_auto(&mut self) {
+        if !self.auto.enabled || self.state.joined.is_some() || self.auto.saved.is_empty() || !matches!(self.state.power, Power::On) {
+            return;
+        }
+        let mut best: Option<(i32, Saved)> = None;
+        for network in &self.state.networks {
+            if !network.security.joinable() || self.auto_tried.contains(&network.ssid) {
+                continue;
+            }
+            for saved in &self.auto.saved {
+                if saved.ssid == network.ssid && best.as_ref().is_none_or(|(signal, _)| network.signal > *signal) {
+                    best = Some((network.signal, saved.clone()));
+                }
+            }
+        }
+        let Some((_, saved)) = best else { return };
+        self.auto_tried.insert(saved.ssid.clone());
+        let _ = skyward_sys::kmsg(&format!("joining remembered network {} on its own", saved.name));
+        let mut joined = Joined { ssid: saved.ssid, name: saved.name, security: saved.security, stage: Stage::Joining };
+        if let Err(e) = self.join(&joined, &saved.password) {
+            let _ = skyward_sys::kmsg(&format!("joining remembered network {} failed: {e:#}", joined.name));
+            joined.stage = Stage::Failed;
+        }
+        self.state.joined = Some(joined);
     }
 
     fn joining(&mut self, told: &Told) {

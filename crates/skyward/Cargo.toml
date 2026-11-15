@@ -31,6 +31,8 @@ skyward-backup = { path = "../skyward-backup" }
 skyward-binder = { path = "../skyward-binder" }
 skyward-crypto = { path = "../skyward-crypto" }
 skyward-files = { path = "../skyward-files" }
+skyward-rescue = { path = "../skyward-rescue" }
+skyward-wechat = { path = "../skyward-wechat" }
 zip = { version = "8.6.0", default-features = false }
 libc = { workspace = true }
 procfs = { version = "0.18.0", default-features = false }

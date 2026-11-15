@@ -9,10 +9,13 @@ use skyward_net::release::{Release, Unanswered};
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Bands, Joined, Link, Network, Power, Stage as Joining, Traffic, Wlan};
 use skyward_systems::{Named, Other, Overview, Who};
+use skyward_rescue::{Found, Kind};
 use skyward_ui::app::{
     Action, Adding, App, Asked, BackupAt, BackupEnd, BackupEntry, BackupJob, BackupRefusal, Choice, Clip, Damage, Data, DownloadEnd,
     DownloadJob, EraseStop, Field, FileKind, FileOp, FileRow, FileTask, FsAction, FsRow, Have, Held, Install, ItemEnd, JobEnd, Key, Keys,
-    MountFailure, MountRow, Part, PartKind, PartStop, Pick, Place, Screen, SkywardEnd, SkywardJob, SkywardStage, Source, SystemChoice,
+    MountFailure, MountRow, Part, PartKind, PartStop, Pick, Place, RescueEnd, RescueJob, Screen, SkywardEnd, SkywardJob, SkywardStage, Source,
+    UnlockStage, Unlocked,
+    SystemChoice,
     SystemsWork, TermEnd, Touch, UsbDrive, UsbLink, SCREEN_OFF,
 };
 use skyward_ui::widgets::{self, Bar, Bolt, Cap, Layer};
@@ -142,7 +145,7 @@ fn main() -> Result<()> {
         eprintln!("axis {tag}: {min}..{max} (default {def})");
     }
 
-    let cfg = DeviceConfig::load(root.join("devices/nezha.toml"))?;
+    let cfg = DeviceConfig::load(root.join("devices/shennong.toml"))?;
     let (w, h) = (cfg.display.width, cfg.display.height);
     let ppd = cfg.display.density as f32 / 160.0;
     let light = Theme::light(w, h, ppd);
@@ -188,6 +191,110 @@ fn main() -> Result<()> {
         app.state.pattern = pattern.to_vec();
         let path = out.join(format!("{name}.png"));
         write_png(&path, &whole_page(&mut app, &fonts, info))?;
+        println!("wrote {}", path.display());
+    }
+
+    // The rescue page, with a look that has ended and its tally to show.
+    for (name, dark) in [("20-rescue-light", false), ("21-rescue-dark", true)] {
+        let mut app = opened(Screen::Rescue, w, h, ppd);
+        app.state.dark = dark;
+        app.rescue_found(vec![
+            a_found("/data/media/0/DCIM/Camera/IMG_20251114_183245.jpg", 4_512_000, Kind::Image),
+            a_found("/data/media/0/Pictures/WeiXin/mmexport1731602345.jpg", 812_000, Kind::Image),
+            a_found("/data/media/999/DCIM/Camera/IMG_20251102_091233.jpg", 3_204_000, Kind::Image),
+            a_found("/data/media/0/DCIM/Camera/VID_20251114_183245.mp4", 234_881_024, Kind::Video),
+            a_found("/data/media/0/Movies/旅行记录.mp4", 1_204_000_000, Kind::Video),
+            a_found("/data/media/0/Documents/保修单.pdf", 428_000, Kind::Document),
+            a_found("/data/media/0/Download/体检报告.pdf", 1_204_000, Kind::Document),
+            a_found("/data/data/com.tencent.mm/MicroMsg/3f2a9c/EnMicroMsg.db", 268_435_456, Kind::Wechat),
+        ]);
+        let path = out.join(format!("{name}.png"));
+        write_png(&path, &whole_page(&mut app, &fonts, &info))?;
+        println!("wrote {}", path.display());
+    }
+
+    // The rescue's own page while it works and once it has.
+    let jobs: [(&str, bool, RescueJob); 4] = [
+        (
+            "22-rescue-looking-light",
+            false,
+            RescueJob {
+                saving: false,
+                seen: 18_432,
+                found: 2_861,
+                bytes: 12_884_901_888,
+                at: "/data/media/0/Android/data".into(),
+                whole: 0,
+                unlocking: None,
+                end: None,
+            },
+        ),
+        (
+            "23-rescue-saving-dark",
+            true,
+            RescueJob {
+                saving: true,
+                seen: 1_204,
+                found: 2_861,
+                bytes: 3_204_000_000,
+                at: "/data/media/0/DCIM".into(),
+                whole: 12_884_901_888,
+                unlocking: None,
+                end: None,
+            },
+        ),
+        (
+            "25-rescue-unlocking-dark",
+            true,
+            RescueJob {
+                saving: true,
+                seen: 3_612,
+                found: 3_612,
+                bytes: 12_884_901_888,
+                at: String::new(),
+                whole: 12_884_901_888,
+                unlocking: Some((UnlockStage::Databases, 3)),
+                end: None,
+            },
+        ),
+        (
+            "24-rescue-saved-light",
+            false,
+            RescueJob {
+                saving: true,
+                seen: 2_861,
+                found: 2_861,
+                bytes: 12_884_901_888,
+                whole: 12_884_901_888,
+                at: String::new(),
+                unlocking: None,
+                end: Some(RescueEnd::Saved {
+                    files: 2_861,
+                    bytes: 12_884_901_888,
+                    failed: 3,
+                    into: "/data/media/0/SkywardRescue/1763200000".into(),
+                    unlocked: Some(Unlocked { pictures: 1_784, databases: 7 }),
+                }),
+            },
+        ),
+    ];
+    for (name, dark, job) in jobs {
+        let mut app = opened(Screen::RescueJob, w, h, ppd);
+        app.state.dark = dark;
+        // The one that has ended goes through the page's own telling, so
+        // that what is drawn is what a real copy out draws.
+        let saved = match job.end {
+            Some(RescueEnd::Saved { files, bytes, failed, into, unlocked }) => {
+                (Some(skyward_rescue::Summary { files, bytes, failed, into: PathBuf::from(into) }), unlocked)
+            }
+            _ => (None, None),
+        };
+        app.state.rescue.job = Some(RescueJob { end: None, ..job });
+        if let Some(summary) = saved.0 {
+            app.rescue_saved(summary, saved.1);
+        }
+        let path = out.join(format!("{name}.png"));
+        write_png(&path, &whole_page(&mut app, &fonts, &info))?;
         println!("wrote {}", path.display());
     }
 
@@ -1491,6 +1598,10 @@ fn skyward_online(app: &mut App) {
 
 /// A page as most previews show it: on a phone whose data partition is
 /// open, its owner's own files with it.
+fn a_found(path: &str, size: u64, kind: Kind) -> Found {
+    Found { path: PathBuf::from(path), size, modified: 0, kind }
+}
+
 fn opened(screen: Screen, w: u32, h: u32, ppd: f32) -> App {
     let mut app = App::new(screen, w, h, ppd);
     app.state.lang = lang();

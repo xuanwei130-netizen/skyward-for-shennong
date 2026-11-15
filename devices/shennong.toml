@@ -122,6 +122,18 @@ groups = ["root"]
 [[service]]
 path = "/kmlibs/km.sh"
 args = ["/odm/bin/hw/android.hardware.weaver-service.nxp-qti"]
+# This phone's own build keeps the weaver at the path above; the other
+# builds of the hardware keep it under vendor or system_ext, by the same
+# name or without the vendor's own suffix. Where none of them is here the
+# wrapper has nothing to hand over to, and the weaver is left out rather
+# than waited on.
+alternates = [
+    "/vendor/bin/hw/android.hardware.weaver-service.nxp-qti",
+    "/vendor/bin/hw/android.hardware.weaver-service",
+    "/odm/bin/hw/android.hardware.weaver-service",
+    "/system_ext/bin/hw/android.hardware.weaver-service",
+]
+optional = true
 libraries = ["/kmlibs", "/odm/lib64", "/vendor/lib64", "/system/lib64", "/mnt/system/system/lib64/bootstrap"]
 ready_service = "android.hardware.weaver.IWeaver/default"
 manifest = '''<manifest version="1.0" type="device"><hal format="aidl"><name>android.hardware.weaver</name><version>2</version><fqname>IWeaver/default</fqname></hal></manifest>'''

@@ -30,6 +30,7 @@ use skyward_net::github::{Build, Newest};
 use skyward_net::release::{Release, Unanswered};
 use skyward_net::supplicant::Security;
 use skyward_net::wlan::{Joined, Network, Power, Stage as Joining, Traffic, Wlan};
+use skyward_rescue::{Found, Kind};
 use skyward_systems::{Overview, Who};
 use skyward_vab::{BootSlots, Hold, Slot, SnapshotState, Standing};
 
@@ -66,6 +67,10 @@ pub enum Screen {
     BackupJob,
     /// Tools for the experienced: files, a terminal, the logs.
     Advanced,
+    /// The KernelSU modules on the data partition, and turning one off.
+    Modules,
+    /// One module: its details and a swipe to turn it off.
+    ModuleInfo,
     Files,
     /// One file, and what can be done with it.
     FileInfo,
@@ -141,6 +146,11 @@ pub enum Screen {
     /// A network added by hand: its name, how it is protected and its
     /// password, typed on the screen's keyboard.
     WlanAdd,
+    /// Saving what is worth keeping from a phone that no longer starts: the
+    /// pictures and documents anywhere on it, and a chat app's folders.
+    Rescue,
+    /// A rescue looking around or copying out, and how it is going.
+    RescueJob,
 }
 
 /// How far asking the update server for the newest system has come.
@@ -275,6 +285,170 @@ impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Secret({} characters)", self.0.chars().count())
     }
+}
+
+/// A network joined here before, kept so the WLAN can join it again
+/// without asking for its password. Its name is the SSID's bytes: a name
+/// need not be text the pages can show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedWlan {
+    pub ssid: Vec<u8>,
+    pub name: String,
+    pub security: Security,
+    pub password: Secret,
+}
+
+/// A screen lock credential kept so the data partition can open itself
+/// next time. The recovery's settings file holds it in the clear, as it
+/// holds a remembered WLAN password; turning the switch off takes it away.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedData {
+    /// Whose own files the credential opens.
+    pub user: u32,
+    pub code: Secret,
+}
+
+/// What a rescue looks for, in the order the page offers them.
+pub const RESCUE_KINDS: [Kind; 4] = [Kind::Image, Kind::Video, Kind::Document, Kind::Wechat];
+
+/// How much of one kind a look around found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// What the rescue page holds: what is ticked, what a look found, and the
+/// work under way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rescue {
+    /// What to look for, by place in [`RESCUE_KINDS`].
+    pub picked: [bool; RESCUE_KINDS.len()],
+    /// What the last look found, by place in [`RESCUE_KINDS`]; none until
+    /// one has ended.
+    pub tally: Option<[Tally; RESCUE_KINDS.len()]>,
+    /// Every file the last look kept, kept for the copy out.
+    pub found: Vec<Found>,
+    /// The work under way, for the job page.
+    pub job: Option<RescueJob>,
+}
+
+impl Default for Rescue {
+    fn default() -> Self {
+        // Everything is looked for until the user says otherwise: a rescue
+        // is asked for once, and coming back short is worse than slow.
+        Rescue { picked: [true; RESCUE_KINDS.len()], tally: None, found: Vec::new(), job: None }
+    }
+}
+
+/// Which half of opening a chat app's data is under way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UnlockStage {
+    /// Working out the passphrase and putting the databases back.
+    Databases,
+    /// Turning the pictures back.
+    Pictures,
+}
+
+/// What was given back from a chat app's folder once it was copied out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Unlocked {
+    pub pictures: u64,
+    pub databases: usize,
+}
+
+/// A rescue under way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RescueJob {
+    /// Whether this copies out or looks around.
+    pub saving: bool,
+    /// Files looked at, or files copied.
+    pub seen: u64,
+    /// Files kept, or files there are to copy.
+    pub found: u64,
+    /// Bytes kept, or bytes copied.
+    pub bytes: u64,
+    /// The folder it is in, or the file being copied.
+    pub at: String,
+    /// Bytes there are to copy, once a look has ended.
+    pub whole: u64,
+    /// What is being given back from the chat app's folder, and how much
+    /// of it is done; none until the copy out has ended and one is there
+    /// to open.
+    pub unlocking: Option<(UnlockStage, u64)>,
+    /// How it ended; none while it is under way.
+    pub end: Option<RescueEnd>,
+}
+
+/// How a rescue ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RescueEnd {
+    /// The copy out ended, and what of the chat app was given back.
+    Saved { files: u64, bytes: u64, failed: u64, into: String, unlocked: Option<Unlocked> },
+    Stopped,
+    Failed(String),
+}
+
+/// A KernelSU module, as the module pages show it. The runtime reads these
+/// from /data/adb/modules; the pages themselves know nothing of the folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleRow {
+    /// The folder's name, which is what KernelSU turns on and off.
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub version_code: String,
+    pub author: String,
+    pub description: String,
+    /// Where the module lives.
+    pub dir: String,
+    /// False once its `disable` marker is there.
+    pub enabled: bool,
+    /// Someone else marked it for deletion.
+    pub remove_pending: bool,
+    pub skip_mount: bool,
+    pub update_pending: bool,
+    /// It ships an `uninstall.sh`; shown as information, never run here.
+    pub has_uninstall: bool,
+    pub has_system: bool,
+}
+
+impl ModuleRow {
+    /// A name a person can read; a module without a name is its id.
+    pub fn display_name(&self) -> &str {
+        if self.name.is_empty() { &self.id } else { &self.name }
+    }
+
+    /// Whether the `disable` marker is already there.
+    pub fn closed(&self) -> bool {
+        !self.enabled
+    }
+
+    /// The markers and contents worth showing under the module.
+    pub fn flags(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.remove_pending { out.push("remove".into()); }
+        if self.skip_mount { out.push("skip_mount".into()); }
+        if self.update_pending { out.push("update".into()); }
+        if self.has_uninstall { out.push("uninstall.sh".into()); }
+        if self.has_system { out.push("system/".into()); }
+        out
+    }
+}
+
+/// How turning a module off went, as the module page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleWork {
+    pub id: String,
+    pub outcome: Result<ModuleClosed, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleClosed {
+    /// The `disable` marker made, or the one already there.
+    pub marker: String,
+    /// Whether the module had been turned off before.
+    pub already: bool,
 }
 
 /// A network being added by hand, as its page shows it.
@@ -567,12 +741,18 @@ pub enum Switch {
     /// over.
     KeepRecovery,
     Wlan,
+    /// Join a remembered network as soon as the WLAN is on and the
+    /// network is in range.
+    WlanAuto,
     /// Turn the LocalSend file transfer endpoint on or off.
     LocalSend,
     /// Hear a double tap on the dark panel and light it.
     DoubleTap,
     /// Show the password typed rather than a dot for each character.
     ShowPassword,
+    /// Keep the screen lock credential and open the data partition with
+    /// it on the next start.
+    DataRemember,
 }
 
 /// What a backup can take, in the order the backup page lists it.
@@ -882,6 +1062,8 @@ pub enum Confirm {
     /// Give the data partition's files the SELinux labels the installed
     /// system's rules give them.
     Relabel,
+    /// Turn the KernelSU module its page shows off.
+    CloseModule,
     /// Do to the partition the filesystem page shows what it chose.
     Filesystem,
     /// Switch to the system picked on the systems page, and restart into
@@ -1305,6 +1487,12 @@ pub enum Action {
     LeaveNetwork,
     /// Look for the networks in range again.
     Rescan,
+    /// Read the KernelSU modules again.
+    RescanModules,
+    /// Open the page of the KernelSU module at this place in the list.
+    OpenModule(usize),
+    /// Ask to turn the module its page shows off; a swipe then confirms.
+    AskCloseModule,
     /// Open the page that adds a network by hand.
     AddNetwork,
     /// Type into this field of the page that adds a network.
@@ -1330,6 +1518,17 @@ pub enum Action {
     UpdateSkyward,
     /// Stop downloading the build.
     StopSkywardUpdate,
+    /// Tick or untick what a rescue looks for, by its place in
+    /// [`RESCUE_KINDS`].
+    RescueKind(usize),
+    /// Look across the phone for everything ticked.
+    RescueScan,
+    /// Copy out everything the last look found.
+    RescueSave,
+    /// Stop the look or the copy under way.
+    RescueStop,
+    /// Put down what the last look found, to look again.
+    RescueAgain,
     /// A control whose work is not wired up yet; touching it says so.
     Unavailable(&'static str),
 }
@@ -1744,6 +1943,31 @@ pub struct State {
     /// The WLAN, as the runtime last told it; none on a phone whose WLAN the
     /// recovery does not bring up.
     pub wlan: Option<Wlan>,
+    /// Join a remembered network without asking, once the WLAN is on and
+    /// the network is in range.
+    pub wlan_auto: bool,
+    /// Networks joined here before, most recently joined first. Kept
+    /// between starts by the settings file.
+    pub wlan_saved: Vec<SavedWlan>,
+    /// Keep the screen lock credential so the data partition opens itself
+    /// next time, as the settings file keeps it.
+    pub data_remember: bool,
+    /// Credentials kept by the user whose own files they open.
+    pub data_saved: Vec<SavedData>,
+    /// Users whose kept credential was tried this time the partition was
+    /// opened: a stale one is not tried again and again.
+    pub data_auto_tried: Vec<u32>,
+    /// Whether the check now under way is an automatic one, for the page.
+    pub data_auto_used: bool,
+    /// The KernelSU modules, as the runtime last read them, or why it
+    /// could not; none until the modules page has been opened.
+    pub modules: Option<Result<Vec<ModuleRow>, String>>,
+    /// Which of them the module page shows.
+    pub module_pick: usize,
+    /// Turning the module shown off was asked for; a swipe confirms it.
+    pub module_asking: bool,
+    /// How turning a module off last went.
+    pub module_work: Option<ModuleWork>,
     /// The LocalSend endpoint, as the runtime last told it. It starts off
     /// until its switch is turned on.
     pub local_send: LocalSendStatus,
@@ -1770,6 +1994,8 @@ pub struct State {
     pub skyward_job: Option<SkywardJob>,
     /// How fast data went over the network joined in the last second.
     pub traffic: Traffic,
+    /// What a rescue looks for, what it found, and the work under way.
+    pub rescue: Rescue,
 }
 
 impl Default for State {
@@ -1844,6 +2070,16 @@ impl Default for State {
             part_work: None,
             update: Standing::None,
             wlan: None,
+            wlan_auto: true,
+            wlan_saved: Vec::new(),
+            data_remember: true,
+            data_saved: Vec::new(),
+            data_auto_tried: Vec::new(),
+            data_auto_used: false,
+            modules: None,
+            module_pick: 0,
+            module_asking: false,
+            module_work: None,
             local_send: LocalSendStatus::default(),
             joining: None,
             details: None,
@@ -1857,6 +2093,7 @@ impl Default for State {
             skyward_check: SkywardCheck::Idle,
             skyward_job: None,
             traffic: Traffic::default(),
+            rescue: Rescue::default(),
         }
     }
 }
@@ -2092,6 +2329,12 @@ pub enum Effect {
     Relabel,
     /// Stop giving the data partition's files their labels.
     StopRelabel,
+    /// Read the KernelSU modules for the modules page, telling them with
+    /// [`App::set_modules`]. The data partition has to be open first.
+    ReadModules,
+    /// Turn the KernelSU module `id` off by making its `disable` marker;
+    /// how it went comes back with [`App::module_closed`].
+    CloseModule { id: String },
     /// Read the partitions for the filesystem page, which has just opened,
     /// telling them with [`App::set_filesystems`].
     ReadFilesystems,
@@ -2126,6 +2369,10 @@ pub enum Effect {
     /// Turn the WLAN on or off; how it stands comes back with
     /// [`App::set_wlan`].
     Wlan(bool),
+    /// The networks the WLAN remembers, or whether it joins them on its
+    /// own, have changed: the runtime hands the new settings to the WLAN
+    /// thread.
+    WlanConfig,
     ScanWlan,
     JoinWlan { ssid: Vec<u8>, name: String, security: Security, password: Secret },
     LeaveWlan,
@@ -2150,6 +2397,16 @@ pub enum Effect {
     /// Merge the update that waits in the slot the phone runs from,
     /// telling how it goes with [`App::set_update`].
     Merge,
+    /// Look across the phone for these kinds of file, telling how far it
+    /// has come with [`App::rescue_progress`] and what it found with
+    /// [`App::rescue_found`].
+    RescueScan(Vec<Kind>),
+    /// Copy these out into the owner's own shared storage, telling how far
+    /// it has come with [`App::rescue_progress`] and how it ended with
+    /// [`App::rescue_saved`].
+    RescueSave(Vec<Found>),
+    /// Stop the rescue under way.
+    RescueStop,
 }
 
 enum Drag {
@@ -3361,6 +3618,7 @@ impl App {
             None => Data::Open,
         };
         self.state.code.clear();
+        self.state.data_auto_used = false;
         self.refresh();
     }
 
@@ -3376,6 +3634,9 @@ impl App {
         if let Data::Locked { checking, .. } = &mut self.state.data {
             *checking = false;
         }
+        // A kept credential that did not open the files is not tried again
+        // this time: the user types the new one instead.
+        self.state.data_auto_used = false;
         self.refresh();
         self.report(&why, now);
     }
@@ -3689,6 +3950,186 @@ impl App {
             self.state.traffic = t;
             self.dirty = true;
         }
+    }
+
+    /// A network was joined by hand: keep it so the WLAN can join it on
+    /// its own next time. The most recently joined stands first, and a
+    /// network joined again takes its old place with its new password.
+    pub fn remember_wlan(&mut self, ssid: Vec<u8>, name: String, security: Security, password: String) {
+        if !self.state.wlan_auto || !security.joinable() || ssid.is_empty() {
+            return;
+        }
+        self.state.wlan_saved.retain(|s| s.ssid != ssid);
+        self.state.wlan_saved.insert(0, SavedWlan { ssid, name, security, password: Secret(password) });
+        // A handful is plenty: the oldest is the least likely to be near.
+        self.state.wlan_saved.truncate(16);
+        self.refresh();
+    }
+
+    /// A network was left and forgotten on its details page.
+    pub fn forget_wlan(&mut self, ssid: &[u8]) {
+        let before = self.state.wlan_saved.len();
+        self.state.wlan_saved.retain(|s| s.ssid != ssid);
+        if self.state.wlan_saved.len() != before {
+            self.refresh();
+        }
+    }
+
+    /// A screen lock was entered by hand: keep it for this user so the
+    /// data partition can open itself next time. A credential entered
+    /// again takes its old place.
+    pub fn remember_data(&mut self, user: u32, code: String) {
+        if !self.state.data_remember || code.is_empty() {
+            return;
+        }
+        self.state.data_saved.retain(|s| s.user != user);
+        self.state.data_saved.push(SavedData { user, code: Secret(code) });
+        self.refresh();
+    }
+
+    /// Open the user's own files with the credential kept for them, once
+    /// per opening of the partition. A stale credential is not tried
+    /// again, so a wrong one cannot keep the page busy forever; the user
+    /// is asked to type the new one instead.
+    pub fn auto_unlock(&mut self) -> Vec<Effect> {
+        let Data::Locked { user, keys, checking: false } = self.state.data else { return Vec::new() };
+        if !self.state.data_remember || self.state.data_auto_tried.contains(&user) {
+            return Vec::new();
+        }
+        let Some(saved) = self.state.data_saved.iter().find(|s| s.user == user) else { return Vec::new() };
+        let code = saved.code.0.clone();
+        self.state.data_auto_tried.push(user);
+        self.state.data_auto_used = true;
+        self.state.data = Data::Locked { user, keys, checking: true };
+        self.refresh();
+        vec![Effect::Unlock { user, code }]
+    }
+
+    /// The kinds a rescue was asked to look for, in the order the page
+    /// offers them.
+    pub fn rescue_wanted(&self) -> Vec<Kind> {
+        RESCUE_KINDS.iter().zip(self.state.rescue.picked).filter(|(_, on)| *on).map(|(kind, _)| *kind).collect()
+    }
+
+    /// A rescue was asked for: its page opens with the first state of the
+    /// work already in place, so that what follows knows whether it copies
+    /// out or looks around.
+    fn rescue_started(&mut self, saving: bool) {
+        self.state.rescue.tally = None;
+        self.state.rescue.found.clear();
+        self.state.rescue.job = Some(RescueJob {
+            saving,
+            seen: 0,
+            found: 0,
+            bytes: 0,
+            at: String::new(),
+            whole: 0,
+            unlocking: None,
+            end: None,
+        });
+        self.open(Screen::RescueJob);
+    }
+
+    /// How far a rescue has come.
+    pub fn rescue_progress(&mut self, p: skyward_rescue::Progress) {
+        let Some(job) = self.state.rescue.job.as_mut() else { return };
+        job.seen = p.seen;
+        job.found = p.found;
+        job.bytes = p.bytes;
+        job.at = p.at;
+        self.refresh();
+    }
+
+    /// What a look around found: the tally its page shows, and the files
+    /// kept for the copy out. The page it was started from comes back, so
+    /// that what was found is what the user sees next.
+    pub fn rescue_found(&mut self, found: Vec<Found>) {
+        let mut tally = [Tally::default(); RESCUE_KINDS.len()];
+        for file in &found {
+            if let Some(at) = RESCUE_KINDS.iter().position(|kind| *kind == file.kind) {
+                tally[at].files += 1;
+                tally[at].bytes += file.size;
+            }
+        }
+        self.state.rescue.tally = Some(tally);
+        self.state.rescue.found = found;
+        self.state.rescue.job = None;
+        if self.screen() == Screen::RescueJob {
+            self.leave(true);
+            self.stack.pop();
+            self.settle_page();
+        }
+        self.refresh();
+    }
+
+    /// What is being given back from the chat app's folder, and how much
+    /// of it is done.
+    pub fn rescue_unlocking(&mut self, stage: UnlockStage, count: u64) {
+        if let Some(job) = self.state.rescue.job.as_mut() {
+            job.unlocking = Some((stage, count));
+        }
+        self.refresh();
+    }
+
+    /// The copy out ended, where it went, and what of the chat app was
+    /// given back.
+    pub fn rescue_saved(&mut self, summary: skyward_rescue::Summary, unlocked: Option<Unlocked>) {
+        let whole = summary.bytes;
+        // The folder is shown from the shared storage down: the rest of
+        // the path is the same on every phone and says nothing.
+        let full = summary.into.display().to_string();
+        let shown = full.strip_prefix("/data/media/0/").unwrap_or(&full).to_string();
+        if let Some(job) = self.state.rescue.job.as_mut() {
+            job.seen = summary.files;
+            job.found = summary.files;
+            job.bytes = whole;
+            job.whole = whole;
+            job.unlocking = None;
+            job.end = Some(RescueEnd::Saved {
+                files: summary.files,
+                bytes: summary.bytes,
+                failed: summary.failed,
+                into: shown,
+                unlocked,
+            });
+        }
+        self.refresh();
+    }
+
+    /// A rescue that stopped or failed.
+    pub fn rescue_ended(&mut self, end: RescueEnd) {
+        if let Some(job) = self.state.rescue.job.as_mut() {
+            job.end = Some(end);
+        }
+        self.refresh();
+    }
+
+    /// Put down what the last look found, to look again.
+    pub fn rescue_again(&mut self) {
+        self.state.rescue.tally = None;
+        self.state.rescue.found.clear();
+        self.state.rescue.job = None;
+        self.refresh();
+    }
+
+    /// The KernelSU modules, as the runtime last read them.
+    pub fn set_modules(&mut self, rows: Result<Vec<ModuleRow>, String>) {
+        self.state.modules = Some(rows);
+        self.refresh();
+    }
+
+    /// How turning a module off went: the list is read again so the page
+    /// shows its new state.
+    pub fn module_closed(&mut self, work: ModuleWork) -> Vec<Effect> {
+        self.state.module_work = Some(work);
+        self.state.module_asking = false;
+        self.refresh();
+        vec![Effect::ReadModules]
+    }
+
+    /// The module its page shows.
+    fn module_row(&self) -> Option<&ModuleRow> {
+        self.state.modules.as_ref()?.as_ref().ok()?.get(self.state.module_pick)
     }
 
     /// What the status bar shows of the WLAN: the network joined, while it
@@ -5228,6 +5669,14 @@ impl App {
         match s {
             Screen::Mount => vec![Effect::ReadMounts],
             Screen::Filesystems => vec![Effect::ReadFilesystems],
+            // The modules live on the data partition; the page says to
+            // decrypt it first rather than reading a folder that is not
+            // there yet.
+            Screen::Modules if !self.state.data.storage_open() => {
+                self.state.modules = None;
+                Vec::new()
+            }
+            Screen::Modules => vec![Effect::ReadModules],
             Screen::Slot | Screen::Reboot => vec![Effect::ReadSlots],
             Screen::Systems => vec![Effect::ReadSystems],
             Screen::Restore => vec![self.find_backups()],
@@ -5279,6 +5728,8 @@ impl App {
     /// Open the data partition, the decrypt page saying so meanwhile.
     fn open_data(&mut self) -> Vec<Effect> {
         self.state.data = Data::Opening;
+        self.state.data_auto_tried.clear();
+        self.state.data_auto_used = false;
         self.refresh();
         vec![Effect::OpenData]
     }
@@ -5348,6 +5799,8 @@ impl App {
                     Switch::Signature => &mut self.state.check_signature,
                     Switch::KeepRecovery => &mut self.state.keep_recovery,
                     Switch::ShowPassword => &mut self.state.show_password,
+                    Switch::WlanAuto => &mut self.state.wlan_auto,
+                    Switch::DataRemember => &mut self.state.data_remember,
                     Switch::Wlan => unreachable!("the WLAN switch is turned above"),
                     Switch::LocalSend => unreachable!("the LocalSend switch is turned above"),
                 };
@@ -5356,6 +5809,24 @@ impl App {
                 self.refresh();
                 if switch == Switch::FileTransfer {
                     return vec![Effect::FileTransfer(now_on)];
+                }
+                // Turning the automatic joining off takes the remembered
+                // networks with it, so their passwords do not stay in the
+                // settings file once they are of no use.
+                if switch == Switch::WlanAuto && !now_on {
+                    self.state.wlan_saved.clear();
+                    return vec![Effect::WlanConfig];
+                }
+                if switch == Switch::WlanAuto {
+                    return vec![Effect::WlanConfig];
+                }
+                // Turning the remembered credential off takes it away at
+                // once, so the screen lock does not stay in the settings
+                // file once it is of no use.
+                if switch == Switch::DataRemember && !now_on {
+                    self.state.data_saved.clear();
+                    self.state.data_auto_tried.clear();
+                    self.state.data_auto_used = false;
                 }
             }
             Action::MountToggle(i) => {
@@ -5735,6 +6206,51 @@ impl App {
                 return fx;
             }
             Action::Rescan => return vec![Effect::ScanWlan],
+            Action::RescanModules => return vec![Effect::ReadModules],
+            Action::RescueKind(at) => {
+                if let Some(on) = self.state.rescue.picked.get_mut(at) {
+                    *on = !*on;
+                    self.refresh();
+                }
+                return Vec::new();
+            }
+            Action::RescueScan => {
+                let kinds = self.rescue_wanted();
+                if kinds.is_empty() {
+                    let text = l.pick(["先选择要找回的内容", "先選擇要找回的內容", "Choose something to look for first"]);
+                    self.say(text, now);
+                    return Vec::new();
+                }
+                self.rescue_started(false);
+                return vec![Effect::RescueScan(kinds)];
+            }
+            Action::RescueSave => {
+                if self.state.rescue.found.is_empty() {
+                    let text = l.pick(["没有可导出的文件", "沒有可匯出的檔案", "There is nothing to copy out"]);
+                    self.say(text, now);
+                    return Vec::new();
+                }
+                let found = self.state.rescue.found.clone();
+                self.rescue_started(true);
+                return vec![Effect::RescueSave(found)];
+            }
+            Action::RescueStop => return vec![Effect::RescueStop],
+            Action::RescueAgain => {
+                self.rescue_again();
+                return Vec::new();
+            }
+            Action::OpenModule(i) => {
+                self.state.module_pick = i;
+                self.state.module_asking = false;
+                self.state.module_work = None;
+                self.open(Screen::ModuleInfo);
+            }
+            // Turning a module off is asked for, then confirmed with a
+            // swipe: it takes effect on the next boot.
+            Action::AskCloseModule => {
+                self.state.module_asking = true;
+                self.refresh();
+            }
             Action::AddNetwork => {
                 self.state.adding = Some(Adding { name: String::new(), security: Security::Open, field: Field::Name, choosing: false });
                 self.state.password.clear();
@@ -5945,6 +6461,9 @@ impl App {
     /// checked, and nothing more is entered until it has been.
     fn unlock(&mut self, code: String) -> Vec<Effect> {
         let Data::Locked { user, keys, .. } = self.state.data else { unreachable!("only a screen lock waiting takes what is entered") };
+        // A credential typed by hand is the one to try next time; one the
+        // recovery tried on its own is not typed here at all.
+        self.remember_data(user, code.clone());
         self.state.data = Data::Locked { user, keys, checking: true };
         self.refresh();
         vec![Effect::Unlock { user, code }]
@@ -6755,6 +7274,13 @@ impl App {
                 }
             }
             Confirm::DeleteEntry => fx.push(Effect::Delete(self.entry_path())),
+            Confirm::CloseModule => {
+                self.state.module_asking = false;
+                if let Some(m) = self.module_row() {
+                    fx.push(Effect::CloseModule { id: m.id.clone() });
+                }
+                self.refresh();
+            }
             // The partition has to be open; whether its users have unlocked
             // their own files makes no difference.
             Confirm::Relabel => match self.state.data {
@@ -7280,6 +7806,7 @@ mod tests {
     use skyward_install::{Failure, Refusal};
     use skyward_net::reach::Reach;
     use skyward_vab::SnapshotState;
+    use std::path::PathBuf;
 
     // A Xiaomi 13 Ultra panel: 1440 × 3200 at 560 dpi.
     const W: u32 = 1440;
@@ -7333,6 +7860,7 @@ mod tests {
             Screen::Restore,
             Screen::Advanced,
             Screen::Files,
+            Screen::Rescue,
             Screen::Terminal,
             Screen::Language,
             Screen::TimeZone,
@@ -7565,6 +8093,66 @@ mod tests {
         assert_eq!(fmt::next_boot(Lang::Hans, Slot::A, Slot::B), ("重启后从 A 槽位启动".into(), "当前运行的是 B 槽位".into()));
     }
 
+    fn a_file(path: &str, size: u64, kind: Kind) -> Found {
+        Found { path: PathBuf::from(path), size, modified: 0, kind }
+    }
+
+    #[test]
+    fn a_rescue_counts_what_it_found_by_kind() {
+        let mut app = App::new(Screen::Rescue, W, H, PPD);
+        app.rescue_found(vec![
+            a_file("/data/media/0/DCIM/a.jpg", 100, Kind::Image),
+            a_file("/data/media/0/DCIM/b.jpg", 200, Kind::Image),
+            a_file("/data/media/0/DCIM/VID_1.mp4", 5000, Kind::Video),
+            a_file("/data/media/0/Documents/c.pdf", 50, Kind::Document),
+            a_file("/data/data/com.tencent.mm/x.db", 1000, Kind::Wechat),
+        ]);
+        let tally = app.state.rescue.tally.expect("a look that ended has a tally");
+        assert_eq!((tally[0].files, tally[0].bytes), (2, 300), "pictures");
+        assert_eq!((tally[1].files, tally[1].bytes), (1, 5000), "films");
+        assert_eq!((tally[2].files, tally[2].bytes), (1, 50), "documents");
+        assert_eq!((tally[3].files, tally[3].bytes), (1, 1000), "the chat app");
+        assert_eq!(app.state.rescue.found.len(), 5, "everything kept is held for the copy out");
+        assert!(app.state.rescue.job.is_none(), "the job page is done with");
+    }
+
+    #[test]
+    fn a_rescue_asked_to_copy_out_hands_the_runtime_what_it_found() {
+        let mut app = App::new(Screen::Rescue, W, H, PPD);
+        app.rescue_found(vec![a_file("/data/media/0/DCIM/a.jpg", 100, Kind::Image)]);
+        let fx = app.act(Action::RescueSave, 0);
+        assert!(matches!(fx.as_slice(), [Effect::RescueSave(found)] if found.len() == 1), "got {fx:?}");
+        assert_eq!(app.screen(), Screen::RescueJob, "the work has a page of its own");
+        assert!(app.state.rescue.job.as_ref().is_some_and(|job| job.saving && job.end.is_none()));
+    }
+
+    #[test]
+    fn a_rescue_with_nothing_ticked_looks_for_nothing() {
+        let mut app = App::new(Screen::Rescue, W, H, PPD);
+        app.state.rescue.picked = [false; RESCUE_KINDS.len()];
+        assert!(app.rescue_wanted().is_empty());
+        assert!(app.act(Action::RescueScan, 0).is_empty(), "nothing is walked");
+        assert_eq!(app.screen(), Screen::Rescue, "and no page is opened over it");
+    }
+
+    #[test]
+    fn a_rescue_that_saved_says_how_much_and_where() {
+        let mut app = App::new(Screen::Rescue, W, H, PPD);
+        app.rescue_found(vec![a_file("/data/media/0/DCIM/a.jpg", 100, Kind::Image)]);
+        app.act(Action::RescueSave, 0);
+        app.rescue_saved(skyward_rescue::Summary {
+            files: 1,
+            bytes: 100,
+            failed: 0,
+            into: PathBuf::from("/data/media/0/SkywardRescue/1"),
+        }, None);
+        let end = app.state.rescue.job.as_ref().and_then(|job| job.end.as_ref());
+        assert!(
+            matches!(end, Some(RescueEnd::Saved { files: 1, bytes: 100, failed: 0, into, unlocked }) if into.ends_with("SkywardRescue/1") && unlocked.is_none()),
+            "got {end:?}"
+        );
+    }
+
     #[test]
     fn the_status_bar_carries_the_slot_the_data_partitions_lock_and_the_temperature() {
         let i = DeviceInfo { slot: Some(Slot::B), battery: Some(battery_at(64, Charge::Charging)), ..info() };
@@ -7587,7 +8175,10 @@ mod tests {
     }
 
     /// A screen the home page's rows fit on with a little room to spare.
-    const SNUG: u32 = 3000;
+    /// Two rows taller than the original home page: the file manager and
+    /// the rescue sit under Install now, so the last row ends at 3256
+    /// rather than 2866.
+    const SNUG: u32 = 3300;
 
     #[test]
     fn a_home_page_grown_by_an_update_notice_scrolls_down_to_its_last_row() {
@@ -7596,7 +8187,7 @@ mod tests {
         let mut app = App::new(Screen::Home, W, SNUG, PPD);
         let fr = app.frame(&f, &plain);
         let reboot = fr.hits.iter().find(|h| h.action == Action::Open(Screen::Reboot)).expect("a reboot row").rect;
-        assert!(reboot.y + reboot.h <= SNUG as f32, "without the notice the rows fit the screen");
+        assert!(reboot.y + reboot.h <= SNUG as f32, "without the notice the rows fit the screen: bottom={} snug={SNUG}", reboot.y + reboot.h);
         let i = DeviceInfo { snapshot: SnapshotState::Snapshotted, ..info() };
         let mut app = App::new(Screen::Home, W, SNUG, PPD);
         let fr = app.frame(&f, &i);
@@ -8579,7 +9170,11 @@ mod tests {
         scroll_to(&mut app, &f, end, 0);
         app.tick(2000);
         assert_eq!((app.title.level(2000), app.bar.level(2000)), (1.0, 1.0), "scrolled down, the bar is up");
-        tap_at(&mut app, &f, &i, Action::Open(Screen::Language), 3000);
+        // The lock-screen group made the settings page taller, so at the
+        // very bottom the Language row has scrolled out of reach. What
+        // this test is about is the bar on coming back, so open the child
+        // page without relying on where its row now sits.
+        app.act(Action::Open(Screen::Language), 3000);
         assert_eq!(app.screen(), Screen::Language);
         tap_back(&mut app, &f, &i, 4000);
         assert_eq!(app.screen(), Screen::Settings);
@@ -9570,6 +10165,136 @@ mod tests {
         fx.extend(app.touch(Touch::Move(track.x + track.w, y), f, 0));
         fx.extend(app.touch(Touch::Up, f, 0));
         fx
+    }
+
+    #[test]
+    fn the_home_page_puts_the_file_manager_right_under_install() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Home, W, H, PPD);
+        let fr = app.frame(&f, &i);
+        let install = fr.hits.iter().find(|h| h.action == Action::Open(Screen::Install)).expect("an install row").rect;
+        let files = fr.hits.iter().find(|h| h.action == Action::Open(Screen::Files)).expect("a file manager row on the home page").rect;
+        assert!(files.y > install.y, "the file manager sits under Install");
+        assert_eq!(tap(&mut app, &f, &i, Action::Open(Screen::Files)), vec![Effect::ReadDir("/".into())]);
+        assert_eq!(app.screen(), Screen::Files);
+    }
+
+    #[test]
+    fn turning_automatic_joining_off_takes_the_remembered_networks_with_it() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Wlan, W, H, PPD);
+        app.state.wlan = Some(Wlan::default());
+        app.state.wlan_saved = vec![SavedWlan {
+            ssid: b"Home".to_vec(),
+            name: "Home".into(),
+            security: Security::Psk,
+            password: Secret("pw".into()),
+        }];
+        app.refresh();
+        let fr = app.frame(&f, &i);
+        assert!(fr.hits.iter().any(|h| h.action == Action::Toggle(Switch::WlanAuto)), "the WLAN page offers the switch");
+        assert_eq!(tap(&mut app, &f, &i, Action::Toggle(Switch::WlanAuto)), vec![Effect::WlanConfig]);
+        assert!(!app.state.wlan_auto);
+        assert!(app.state.wlan_saved.is_empty(), "the passwords do not stay in the settings file");
+    }
+
+    #[test]
+    fn a_network_joined_is_remembered_only_while_automatic_joining_is_on() {
+        let mut app = App::new(Screen::Wlan, W, H, PPD);
+        app.remember_wlan(b"Cafe".to_vec(), "Cafe".into(), Security::Open, String::new());
+        assert_eq!(app.state.wlan_saved.len(), 1);
+        app.remember_wlan(b"Cafe".to_vec(), "Cafe".into(), Security::Psk, "new".into());
+        assert_eq!(app.state.wlan_saved.len(), 1, "one network is kept once, with its latest password");
+        assert_eq!(app.state.wlan_saved[0].password.0, "new");
+        app.forget_wlan(b"Cafe");
+        assert!(app.state.wlan_saved.is_empty());
+        app.state.wlan_auto = false;
+        app.remember_wlan(b"Home".to_vec(), "Home".into(), Security::Psk, "pw".into());
+        assert!(app.state.wlan_saved.is_empty(), "with the switch off nothing is kept");
+    }
+
+    #[test]
+    fn a_kernelsu_module_is_turned_off_with_a_swipe() {
+        let (f, i) = (fonts(), info());
+        let mut app = App::new(Screen::Modules, W, H, PPD);
+        app.state.data = Data::Open;
+        assert_eq!(app.arrive(), vec![Effect::ReadModules]);
+        let row = ModuleRow {
+            id: "zygisksu".into(),
+            name: "ZygiskNext".into(),
+            version: "v1.2.0".into(),
+            version_code: "120".into(),
+            author: "Someone".into(),
+            description: "A module".into(),
+            dir: "/data/adb/modules/zygisksu".into(),
+            enabled: true,
+            remove_pending: false,
+            skip_mount: false,
+            update_pending: false,
+            has_uninstall: true,
+            has_system: true,
+        };
+        app.state.modules = Some(Ok(vec![row]));
+        app.refresh();
+        assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::OpenModule(0)));
+        assert!(tap(&mut app, &f, &i, Action::OpenModule(0)).is_empty());
+        assert_eq!(app.screen(), Screen::ModuleInfo);
+        assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::AskCloseModule));
+        assert!(tap(&mut app, &f, &i, Action::AskCloseModule).is_empty());
+        assert!(app.frame(&f, &i).hits.iter().any(|h| h.action == Action::Confirm(Confirm::CloseModule)));
+        assert_eq!(swipe(&mut app, &f, &i, Confirm::CloseModule), vec![Effect::CloseModule { id: "zygisksu".into() }]);
+        assert_eq!(app.module_closed(ModuleWork { id: "zygisksu".into(), outcome: Ok(ModuleClosed { marker: "/data/adb/modules/zygisksu/disable".into(), already: false }) }), vec![Effect::ReadModules]);
+    }
+
+    #[test]
+    fn the_modules_page_waits_for_the_data_partition() {
+        let mut app = App::new(Screen::Modules, W, H, PPD);
+        assert_eq!(app.arrive(), Vec::new(), "nothing is read while the data partition is closed");
+        assert!(app.state.modules.is_none());
+        app.state.data = Data::Open;
+        assert_eq!(app.arrive(), vec![Effect::ReadModules]);
+    }
+
+    #[test]
+    fn a_screen_lock_typed_by_hand_is_kept_and_tried_once_next_time() {
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        assert!(app.state.data_remember, "remembering is on to start with");
+        app.data_waiting(Some((0, Keys::Digits)));
+        assert_eq!(app.unlock("1234".into()), vec![Effect::Unlock { user: 0, code: "1234".into() }]);
+
+        // A fresh start reads the kept credential from the settings file.
+        let settings = Settings::read(&Settings::of(&app.state).text()).unwrap();
+        let mut next = App::new(Screen::Decrypt, W, H, PPD);
+        settings.apply(&mut next.state);
+        assert_eq!(next.state.data_saved.len(), 1);
+        next.data_waiting(Some((0, Keys::Digits)));
+        assert_eq!(next.auto_unlock(), vec![Effect::Unlock { user: 0, code: "1234".into() }]);
+        assert!(next.state.data_auto_used);
+        assert_eq!(next.state.data, Data::Locked { user: 0, keys: Keys::Digits, checking: true });
+        assert_eq!(next.auto_unlock(), Vec::new(), "not tried twice while it is being checked");
+    }
+
+    #[test]
+    fn a_stale_credential_is_not_tried_again_after_it_fails() {
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.state.data_saved = vec![SavedData { user: 0, code: Secret("old".into()) }];
+        app.data_waiting(Some((0, Keys::Digits)));
+        assert_eq!(app.auto_unlock(), vec![Effect::Unlock { user: 0, code: "old".into() }]);
+        app.unlock_failed("the secure world does not recognise that credential".into(), 0);
+        assert_eq!(app.auto_unlock(), Vec::new(), "one try per opening of the partition");
+        assert_eq!(app.unlock("new".into()), vec![Effect::Unlock { user: 0, code: "new".into() }]);
+        assert_eq!(app.state.data_saved, vec![SavedData { user: 0, code: Secret("new".into()) }]);
+    }
+
+    #[test]
+    fn turning_remembering_off_takes_the_credential_away() {
+        let mut app = App::new(Screen::Decrypt, W, H, PPD);
+        app.state.data_saved = vec![SavedData { user: 0, code: Secret("1234".into()) }];
+        app.data_waiting(Some((0, Keys::Digits)));
+        assert!(app.act(Action::Toggle(Switch::DataRemember), 0).is_empty());
+        assert!(!app.state.data_remember);
+        assert!(app.state.data_saved.is_empty(), "the screen lock does not stay in the file");
+        assert_eq!(app.auto_unlock(), Vec::new());
     }
 
     #[test]

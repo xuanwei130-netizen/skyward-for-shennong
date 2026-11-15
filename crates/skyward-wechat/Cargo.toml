@@ -1,0 +1,25 @@
+[package]
+name = "skyward-wechat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+# Reading the chat app's own ciphers: a page at a time, with what the
+# algorithms are named after kept free of the platform's own OpenSSL.
+aes = "0.8.4"
+cbc = "0.1.2"
+hmac = "0.12.1"
+sha1 = "0.10.7"
+sha2 = "0.10.9"
+pbkdf2 = "0.12.2"
+md-5 = "0.10.6"
+# What is written out is given the owner and the label of the folder it
+# goes into, as shared storage needs.
+skyward-files = { path = "../skyward-files" }
+
+[dev-dependencies]
+# To read back what is written: a database that cannot be opened is not a
+# database that was given back.
+rusqlite = { version = "0.40.2", features = ["bundled"] }

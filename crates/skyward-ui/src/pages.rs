@@ -1,8 +1,9 @@
 use crate::app::{
     Action, BackupAt, BackupEnd, BackupJob, Check, ClashChoice, Confirm, Damage, Data, Dock, DownloadEnd, EraseStop, Field, FileKind,
-    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, Pick, Place, Rows, Screen,
+    FileOp, FileTask, Fold, Folder, Frame, FsAction, FsChoice, FsRow, Have, HeroArt, Hit, Install, JobEnd, Keys, ModuleRow, Pick, Place, RescueEnd,
+    RescueJob, Rows, Screen, UnlockStage,
     SkywardCheck, SkywardEnd, SkywardJob, SkywardStage, Slider, Source, State, Switch, SystemsWork, Target, UsbDrive, UsbLink, Wipe, ADDABLE,
-    BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE,
+    BACKUP_PARTS, DATA_ERASED, DATA_PARTITION, DOWNLOADS, FASTBOOT_CHOICES, RESCUE_KINDS, SCREEN_OFF, TARGETS, TIME_ZONES, USB_DRIVE_UNREADABLE,
     USB_DRIVE_WANTED, WIPES, installs, starting,
 };
 use crate::canvas::Canvas;
@@ -81,7 +82,11 @@ pub fn render(screen: Screen, cx: &Ctx) -> Frame {
         Screen::RestoreBackup => restore_backup(cx),
         Screen::BackupJob => backup_job(cx),
         Screen::Advanced => advanced(cx),
+        Screen::Modules => modules(cx),
+        Screen::ModuleInfo => module_info(cx),
         Screen::Files => files(cx),
+        Screen::Rescue => rescue(cx),
+        Screen::RescueJob => rescue_job(cx),
         Screen::FileInfo => file_info(cx),
         Screen::Permissions => permissions(cx),
         Screen::Editor => editor(cx),
@@ -136,6 +141,7 @@ pub fn confirm_label(which: Confirm, s: &State) -> (&'static str, bool) {
         Confirm::RunScript => (INSTALL, true),
         Confirm::Merge => (["滑动以合并", "滑動以合併", "Slide to merge"], true),
         Confirm::Relabel => (["滑动以修复", "滑動以修復", "Slide to fix"], true),
+        Confirm::CloseModule => (["滑动以关闭模块", "滑動以關閉模組", "Slide to turn the module off"], false),
         Confirm::SwitchSystem => (["滑动以切换并重启", "滑動以切換並重新啟動", "Slide to switch and reboot"], false),
         Confirm::RemoveSystem => (["滑动以删除", "滑動以刪除", "Slide to remove"], true),
         Confirm::InstallSystem => (INSTALL, false),
@@ -160,6 +166,13 @@ const REBOOT_TARGETS: [(Text, Option<Text>); 6] = [
 /// What pages are called both on the rows that open them and in their own
 /// titles.
 const WLAN: Text = ["WLAN", "Wi-Fi", "Wi-Fi"];
+const AUTO_WLAN: Text = ["WLAN 自动连接", "Wi-Fi 自動連線", "Connect automatically"];
+const AUTO_NONE: Text = [
+    "开启后记住连过的网络，下次自动连回",
+    "開啟後記住連過的網路，下次自動連回",
+    "Remembers networks joined here and rejoins them",
+];
+const MODULES: Text = ["KernelSU 模块", "KernelSU 模組", "KernelSU modules"];
 const DECRYPT: Text = ["解密", "解密", "Decrypt"];
 const ADVANCED: Text = ["高级", "進階", "Advanced"];
 const SETTINGS: Text = ["设置", "設定", "Settings"];
@@ -289,6 +302,14 @@ pub fn home(cx: &Ctx) -> Frame {
     }
     let tools = widgets::list(&mut c, t, f, y, &[
         Row::new(l.pick(["安装", "安裝", "Install"])).icon(GREEN, Icon::Install),
+        // The file manager is one tap from the home page, right under
+        // Install: choosing a package, copying a backup or looking at a
+        // log are what a recovery is opened for most often.
+        Row::new(l.pick(FILES)).icon(BLUE, Icon::Folder),
+        // Saving what is worth keeping from a phone that will not start is
+        // the other thing a recovery is opened for, and the one nobody
+        // thinks to look for in a tool menu.
+        Row::new(l.pick(RESCUE)).icon(PURPLE, Icon::Shield),
         Row::new(l.pick(["备份", "備份", "Backup"])).icon(BLUE, Icon::Backup),
         Row::new(l.pick(["恢复", "還原", "Restore"])).icon(PURPLE, Icon::Restore),
         Row::new(l.pick(["挂载", "掛載", "Mount"])).icon(SLATE, Icon::Mount),
@@ -296,6 +317,8 @@ pub fn home(cx: &Ctx) -> Frame {
     ]);
     out.extend(hits(&tools.rows, &[
         Action::Open(Screen::Install),
+        Action::Open(Screen::Files),
+        Action::Open(Screen::Rescue),
         Action::Open(Screen::Backup),
         Action::Open(Screen::Restore),
         Action::Open(Screen::Mount),
@@ -398,6 +421,10 @@ pub fn settings(cx: &Ctx) -> Frame {
         "When on, a computer can manage the files in internal storage, once it is decrypted.",
     ]);
     y = widgets::footnote(&mut c, t, f, usb.bottom, note);
+    y = widgets::section(&mut c, t, f, y, l.pick(["解密", "解密", "Decryption"]));
+    let decrypt = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(REMEMBER_DATA)).subtitle(l.pick(REMEMBER_DATA_NOTE)).trail(Trail::Switch(s.data_remember))]);
+    out.extend(hits(&decrypt.rows, &[Action::Toggle(Switch::DataRemember)]));
+    y = widgets::footnote(&mut c, t, f, decrypt.bottom, l.pick(REMEMBER_DATA_SAFETY));
     y = widgets::section(&mut c, t, f, y, l.pick(["调试", "偵錯", "Debugging"]));
     let debug = widgets::list(&mut c, t, f, y, &[Row::new(l.pick(TERMINAL)).icon(SLATE, Icon::Terminal)]);
     out.extend(hits(&debug.rows, &[Action::Open(Screen::Terminal)]));
@@ -702,14 +729,21 @@ pub fn decrypt(cx: &Ctx) -> Frame {
             Some(l.pick(["正在读取锁屏方式", "正在讀取螢幕鎖定方式", "Reading the screen lock"])),
             None,
         ),
-        Data::Open => data_status(
-            cx,
-            c,
-            Icon::Folder,
-            l.pick(["data 分区已解密", "data 分割區已解密", "The data partition is decrypted"]),
-            Some(l.pick(["你可以在「文件管理」中查看本机文件", "你可以在「檔案管理」中查看本機檔案", "You can see the phone's files in File manager"])),
-            None,
-        ),
+        Data::Open => {
+            let note = l.pick(if cx.state.data_remember {
+                ["已记住密码，下次将自动解密", "已記住密碼，下次將自動解密", "Credential kept; next start decrypts on its own"]
+            } else {
+                ["你可以在「文件管理」中查看本机文件", "你可以在「檔案管理」中查看本機檔案", "You can see the phone's files in File manager"]
+            });
+            data_status(
+                cx,
+                c,
+                Icon::Folder,
+                l.pick(["data 分区已解密", "data 分割區已解密", "The data partition is decrypted"]),
+                Some(note),
+                None,
+            )
+        }
         Data::Failed(why) => data_status(cx, c, Icon::Lock, l.pick(["未能打开 data 分区", "無法開啟 data 分割區", "Couldn't open the data partition"]), None, Some(why)),
         Data::Erased => data_status(
             cx,
@@ -768,9 +802,25 @@ fn code(cx: &Ctx, mut c: Canvas, user: u32, keys: Keys, checking: bool) -> Frame
         (false, 0) => l.pick(["输入锁屏密码", "輸入螢幕鎖定密碼", "Enter the screen lock"]).to_string(),
         (false, user) => tr!(l, "输入用户 {user} 的锁屏密码", "輸入使用者 {user} 的螢幕鎖定密碼", "Enter user {user}'s screen lock"),
     };
-    let note = l.pick(if checking { ["正在验证", "正在驗證", "Checking"] } else { ["解密后可查看本机文件", "解密後可查看本機檔案", "Decrypt to see the phone's files"] });
+    let note = l.pick(if checking {
+        if s.data_auto_used {
+            ["正在用记住的密码自动解密…", "正在用記住的密碼自動解密…", "Decrypting with the kept credential…"]
+        } else {
+            ["正在验证", "正在驗證", "Checking"]
+        }
+    } else {
+        ["解密后可查看本机文件", "解密後可查看本機檔案", "Decrypt to see the phone's files"]
+    });
     c.text_center(&f.heading, &title, x, m.dp(130.0), m.dp(24.0), t.pal.text);
     c.text_center(&f.body, note, x, m.dp(166.0), m.sub_px, t.pal.subtitle);
+    // The switch lives on the settings page. Here only a line of text
+    // says what will happen, so the pattern's hit area keeps to itself.
+    let kept = l.pick(if s.data_remember {
+        ["已开启记住密码，下次自动解密", "已開啟記住密碼，下次自動解密", "Credential kept; auto-decrypt next time"]
+    } else {
+        ["记住密码已关闭", "記住密碼已關閉", "Remembering is off"]
+    });
+    c.text_center(&f.body, kept, x, m.dp(196.0), m.sub_px, t.pal.subtitle);
     let mut pattern = None;
     let bottom = match keys {
         Keys::Letters => {
@@ -2209,6 +2259,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
     let top = t.m.content_top;
     let tools = widgets::list(&mut c, t, f, top, &[
         Row::new(l.pick(FILES)).icon(BLUE, Icon::Folder),
+        Row::new(l.pick(MODULES)).icon(ORANGE, Icon::Layers),
         Row::new(l.pick(TERMINAL)).icon(SLATE, Icon::Terminal),
         Row::new(l.pick(RELABEL)).icon(PURPLE, Icon::Shield),
         Row::new(l.pick(FILESYSTEMS)).icon(RED, Icon::Mount),
@@ -2217,6 +2268,7 @@ pub fn advanced(cx: &Ctx) -> Frame {
     ]);
     let out = hits(&tools.rows, &[
         Action::Open(Screen::Files),
+        Action::Open(Screen::Modules),
         Action::Open(Screen::Terminal),
         Action::Open(Screen::Relabel),
         Action::Open(Screen::Filesystems),
@@ -2225,6 +2277,438 @@ pub fn advanced(cx: &Ctx) -> Frame {
     ]);
     Frame::new(t, c, out, l.pick(ADVANCED), top)
 }
+
+/// The KernelSU modules on the data partition, what the runtime last read
+/// of them, and a way in to the page of one. Turning one off is done on
+/// that page, with a swipe; nothing is ever deleted here.
+/// The names a rescue gives its kinds, by place in [`RESCUE_KINDS`].
+const RESCUE_NAMES: [[&str; 3]; 4] = [
+    ["照片与图片", "照片與圖片", "Pictures"],
+    ["视频与影片", "影片與短片", "Films"],
+    ["文档", "文件", "Documents"],
+    ["微信数据（整个目录）", "微信資料（整個目錄）", "WeChat (whole folder)"],
+];
+const RESCUE_COLORS: [Rgba; 4] = [PURPLE, ORANGE, BLUE, GREEN];
+const RESCUE_ICONS: [Icon; 4] = [Icon::Layers, Icon::Film, Icon::Log, Icon::Globe];
+const RESCUE: [&str; 3] = ["数据救援", "資料救援", "Rescue"];
+const RESCUE_HELP: [&str; 3] = [
+    "会走到内部存储的每一个用户和每一张存储卡。照片收相机原片与动态图，视频收常见封装，名字不认识时按文件开头的字节判断。微信按整个目录带走，再还原其中的图片、解开聊天数据库。",
+    "會走到內部儲存空間的每一個使用者和每一張記憶卡。照片收相機原片與動態圖，影片收常見封裝，名稱不認識時依檔案開頭的位元組判斷。微信依整個目錄帶走，再還原其中的圖片、解開聊天資料庫。",
+    "Every user and every card is walked. Pictures take in camera raw files and live photos, films every common wrapper, and a file with no telling name is judged by its first bytes. The chat app's folder is taken whole, then its pictures are turned back and its databases opened.",
+];
+const RESCUE_NEED_DATA: [&str; 3] = [
+    "要找回的内容都在 data 分区上，请先解密。",
+    "要找回的內容都在 data 分割區上，請先解密。",
+    "What is worth saving lies on the data partition. Open it first.",
+];
+const RESCUE_SCAN: [&str; 3] = ["开始扫描", "開始掃描", "Look around"];
+const RESCUE_AGAIN: [&str; 3] = ["重新扫描", "重新掃描", "Look again"];
+const RESCUE_SAVE: [&str; 3] = ["导出到内部存储", "匯出到內部儲存空間", "Copy out to storage"];
+const RESCUE_NOTHING: [&str; 3] = ["什么也没找到", "什麼也沒找到", "Nothing was found"];
+const RESCUE_NO_CHAT: [&str; 3] = [
+    "没有找到微信的数据：它可能在还没有解密的分区里，或这台手机没有装。",
+    "沒有找到微信的資料：它可能在還沒解密的分割區裡，或這台手機沒有安裝。",
+    "No WeChat data was found: it may be on a partition that is not open yet, or the phone may not have it.",
+];
+const RESCUE_UNLOCK_DB: [&str; 3] = ["正在解开微信数据库", "正在解開微信資料庫", "Opening the chat app's databases"];
+const RESCUE_UNLOCK_PIC: [&str; 3] = ["正在还原微信图片", "正在還原微信圖片", "Turning the chat app's pictures back"];
+const RESCUE_OPENED: [&str; 3] = ["微信图片与数据库", "微信圖片與資料庫", "Chat pictures and databases"];
+const RESCUE_STOP: [&str; 3] = ["停止", "停止", "Stop"];
+const RESCUE_LOOKING: [&str; 3] = ["正在扫描", "正在掃描", "Looking around"];
+const RESCUE_SAVING: [&str; 3] = ["正在导出", "正在匯出", "Copying out"];
+const RESCUE_READY: [&str; 3] = ["正在准备", "正在準備", "Getting ready"];
+const RESCUE_DONE: [&str; 3] = ["完成", "完成", "Done"];
+const RESCUE_STOPPED: [&str; 3] = ["已停止", "已停止", "Stopped"];
+const RESCUE_FAILED: [&str; 3] = ["导出没有完成", "匯出沒有完成", "The copy out did not finish"];
+const RESCUE_PARTIAL: [&str; 3] = [
+    "已经导出的文件仍然在，可以再导出一次补齐。",
+    "已經匯出的檔案仍然在，可以再匯出一次補齊。",
+    "What was copied out is still there; copy out again to take the rest.",
+];
+const RESCUE_KEEP: [&str; 3] = [
+    "导出的内容在内部存储的 SkywardRescue 目录里。可以到文件管理复制到 U 盘，或在 WLAN 页用 LocalSend 发给另一台设备。",
+    "匯出的內容在內部儲存空間的 SkywardRescue 目錄裡。可以到檔案管理複製到 USB 隨身碟，或在 WLAN 頁用 LocalSend 傳給另一台裝置。",
+    "What was copied out is under SkywardRescue in internal storage. Copy it to a USB drive from the file manager, or send it with LocalSend on the WLAN page.",
+];
+
+/// Saving what is worth keeping from a phone that no longer starts: what to
+/// look for and what the last look found. Nothing is decoded or parsed
+/// here; the files are taken as they lie, so that they can be read
+/// somewhere else.
+pub fn rescue(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let title = l.pick(RESCUE);
+    // Everything a rescue looks at lies on the data partition, so the page
+    // says to open it rather than walking a folder that is not there.
+    if !s.data.storage_open() {
+        let y = widgets::paragraph(&mut c, t, f, top, l.pick(RESCUE_NEED_DATA));
+        let button = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(l.pick(DECRYPT)).icon(BLUE, Icon::Lock).trail(Trail::None)]);
+        out.extend(hits(&button.rows, &[Action::Open(Screen::Decrypt)]));
+        return Frame::new(t, fit(c, t, button.bottom), out, title, top);
+    }
+    let mut y = widgets::paragraph(&mut c, t, f, top, l.pick(RESCUE_HELP));
+    // What to look for, a tap each.
+    let picked: Vec<Row> = RESCUE_KINDS
+        .iter()
+        .enumerate()
+        .map(|(at, _)| Row::new(l.pick(RESCUE_NAMES[at])).icon(RESCUE_COLORS[at], RESCUE_ICONS[at]).trail(Trail::Check(s.rescue.picked[at])))
+        .collect();
+    let block = widgets::list(&mut c, t, f, y, &picked);
+    let actions: Vec<Action> = (0..RESCUE_KINDS.len()).map(Action::RescueKind).collect();
+    out.extend(hits(&block.rows, &actions));
+    y = block.bottom + t.m.card_gap;
+    let (files, bytes) = match &s.rescue.tally {
+        Some(tally) => (tally.iter().map(|one| one.files).sum::<u64>(), tally.iter().map(|one| one.bytes).sum::<u64>()),
+        None => (0, 0),
+    };
+    // What the last look found, once it has ended: each kind ticked, with
+    // how many and how much.
+    if let Some(tally) = &s.rescue.tally {
+        let subs: Vec<String> = tally.iter().map(|one| format!("{} · {}", one.files, fmt::bytes(one.bytes))).collect();
+        let cards: Vec<Row> = RESCUE_KINDS
+            .iter()
+            .enumerate()
+            .map(|(at, _)| Row::new(l.pick(RESCUE_NAMES[at])).icon(RESCUE_COLORS[at], RESCUE_ICONS[at]).trail(Trail::Text(&subs[at])))
+            .collect();
+        let size = fmt::bytes(bytes);
+        let heading = tr!(l, "上次扫描找到 {files} 个文件 · {size}", "上次掃描找到 {files} 個檔案 · {size}", "{files} files found · {size}");
+        y = widgets::section(&mut c, t, f, y, &heading);
+        let found = widgets::list(&mut c, t, f, y, &cards);
+        y = found.bottom + t.m.card_gap;
+        if files == 0 {
+            y = widgets::footnote(&mut c, t, f, y, l.pick(RESCUE_NOTHING));
+        } else if s.rescue.picked[RESCUE_KINDS.len() - 1] && tally[RESCUE_KINDS.len() - 1].files == 0 {
+            // The chat app's folder only exists once the data partition is
+            // open, and finding nothing there is worth saying aloud.
+            y = widgets::footnote(&mut c, t, f, y, l.pick(RESCUE_NO_CHAT));
+        }
+    }
+    let (label, action) = match (s.rescue.tally.is_some(), files) {
+        (false, _) => (RESCUE_SCAN, Action::RescueScan),
+        (true, 0) => (RESCUE_AGAIN, Action::RescueScan),
+        (true, _) => (RESCUE_SAVE, Action::RescueSave),
+    };
+    let mut buttons = vec![Row::new(l.pick(label)).icon(GREEN, Icon::Backup).trail(Trail::None)];
+    let mut acts = vec![action];
+    if s.rescue.tally.is_some() && files > 0 {
+        buttons.push(Row::new(l.pick(RESCUE_AGAIN)).icon(SLATE, Icon::Restore).trail(Trail::None));
+        acts.push(Action::RescueScan);
+    }
+    let button = widgets::list(&mut c, t, f, y, &buttons);
+    out.extend(hits(&button.rows, &acts));
+    y = widgets::footnote(&mut c, t, f, button.bottom, l.pick(RESCUE_KEEP));
+    Frame::new(t, fit(c, t, y), out, title, top)
+}
+
+/// A rescue under way: how far it has come, and how it ended.
+pub fn rescue_job(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let job = s.rescue.job.as_ref().expect("the rescue page shows work");
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let title = l.pick(RESCUE);
+    let mut y = match &job.end {
+        None => {
+            let (headline, detail) = rescue_words(job, l);
+            // Opening the chat app's folder has no total to measure against, so it
+            // shows what it has done rather than how far along it is.
+            let done = (job.saving && job.unlocking.is_none() && job.whole > 0)
+                .then(|| job.bytes as f32 / job.whole as f32);
+            widgets::progress_card(&mut c, t, f, top, &headline, &detail, done)
+        }
+        Some(RescueEnd::Saved { files, bytes, failed, into, unlocked }) => {
+            let count = *files;
+            let size = fmt::bytes(*bytes);
+            let headline = tr!(l, "已导出 {count} 个文件 · {size}", "已匯出 {count} 個檔案 · {size}", "Copied {count} files · {size}");
+            let detail = tr!(l, "保存在内部存储的 {into}", "儲存在內部儲存空間的 {into}", "Saved in internal storage as {into}");
+            let lost = *failed;
+            let note = match lost {
+                0 => String::new(),
+                _ => tr!(
+                    l,
+                    "{lost} 个文件读不到，已跳过",
+                    "{lost} 個檔案讀不到，已略過",
+                    "{lost} files could not be read and were passed over"
+                ),
+            };
+            // What was given back from the chat app, with the two counts
+            // set to the right: the row itself stays short enough to read
+            // in one line on any of the three languages.
+            let mut opened = String::new();
+            let mut counts = String::new();
+            if let Some(what) = unlocked {
+                if what.pictures > 0 || what.databases > 0 {
+                    let pictures = what.pictures;
+                    let databases = what.databases;
+                    opened = l.pick(RESCUE_OPENED).to_string();
+                    counts = tr!(
+                        l,
+                        "{pictures} 张 · {databases} 个库",
+                        "{pictures} 張 · {databases} 個庫",
+                        "{pictures} · {databases}"
+                    );
+                }
+            }
+            let mut rows = vec![standing(&headline, GREEN, Icon::Backup, &detail)];
+            if !opened.is_empty() {
+                rows.push(Row::new(&opened).icon(PURPLE, Icon::Layers).trail(Trail::Text(&counts)));
+            }
+            if !note.is_empty() {
+                rows.push(Row::new(&note).icon(ORANGE, Icon::Shield).trail(Trail::None));
+            }
+            widgets::list(&mut c, t, f, top, &rows).bottom
+        }
+        Some(RescueEnd::Stopped) => {
+            widgets::list(&mut c, t, f, top, &[standing(l.pick(RESCUE_STOPPED), SLATE, Icon::Shield, l.pick(RESCUE_PARTIAL))]).bottom
+        }
+        Some(RescueEnd::Failed(why)) => {
+            widgets::list(&mut c, t, f, top, &[standing(l.pick(RESCUE_FAILED), RED, Icon::Shield, why)]).bottom
+        }
+    };
+    let (label, action) = match &job.end {
+        None => (l.pick(RESCUE_STOP), Action::RescueStop),
+        Some(_) => (l.pick(RESCUE_DONE), Action::Back),
+    };
+    let button = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(label).icon(SLATE, Icon::More).trail(Trail::None)]);
+    out.extend(hits(&button.rows, &[action]));
+    y = button.bottom;
+    Frame::new(t, fit(c, t, y), out, title, top)
+}
+
+/// What the job page says while a rescue runs: whether it looks around or
+/// copies out, and how far it has come.
+fn rescue_words(job: &RescueJob, l: Lang) -> (String, String) {
+    // Once the copy out has ended, the chat app's own folder is opened in
+    // place, which is the longest wait of the whole rescue and the one
+    // worth saying aloud.
+    if let Some((stage, count)) = job.unlocking {
+        let headline = match stage {
+            UnlockStage::Databases => l.pick(RESCUE_UNLOCK_DB).to_string(),
+            UnlockStage::Pictures => l.pick(RESCUE_UNLOCK_PIC).to_string(),
+        };
+        let detail = tr!(
+            l,
+            "已处理 {count} 个文件",
+            "已處理 {count} 個檔案",
+            "{count} files dealt with"
+        );
+        return (headline, detail);
+    }
+    match job.saving {
+        true => {
+            let done = fmt::bytes(job.bytes);
+            let whole = fmt::bytes(job.whole);
+            let detail = match job.whole {
+                0 => l.pick(RESCUE_READY).to_string(),
+                _ => tr!(l, "已复制 {done}，共 {whole}", "已複製 {done}，共 {whole}", "{done} of {whole} copied"),
+            };
+            (l.pick(RESCUE_SAVING).to_string(), detail)
+        }
+        false => {
+            let seen = job.seen;
+            let found = job.found;
+            let detail = tr!(
+                l,
+                "已检查 {seen} 个文件，找到 {found} 个",
+                "已檢查 {seen} 個檔案，找到 {found} 個",
+                "{seen} files looked at, {found} found"
+            );
+            (l.pick(RESCUE_LOOKING).to_string(), detail)
+        }
+    }
+}
+
+pub fn modules(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let title = l.pick(MODULES);
+    // The modules live under /data, so the partition has to be open first.
+    if !s.data.storage_open() {
+        let y = widgets::paragraph(&mut c, t, f, top, l.pick(MODULES_NEED_DATA));
+        let button = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(l.pick(DECRYPT)).icon(BLUE, Icon::Lock).trail(Trail::None)]);
+        out.extend(hits(&button.rows, &[Action::Open(Screen::Decrypt)]));
+        return Frame::new(t, fit(c, t, button.bottom), out, title, top);
+    }
+    let rows: &[ModuleRow] = match &s.modules {
+        None => {
+            let y = widgets::paragraph(&mut c, t, f, top, l.pick(READING_MODULES));
+            return Frame::new(t, fit(c, t, y), out, title, top);
+        }
+        Some(Err(why)) => {
+            let why = why.as_str();
+            let text = tr!(l, "无法读取 KernelSU 模块：{why}", "無法讀取 KernelSU 模組：{why}", "Couldn't read the KernelSU modules: {why}");
+            let y = widgets::paragraph(&mut c, t, f, top, &text);
+            let retry = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(l.pick(READ_AGAIN)).trail(Trail::None)]);
+            out.extend(hits(&retry.rows, &[Action::RescanModules]));
+            return Frame::new(t, fit(c, t, retry.bottom), out, title, top);
+        }
+        Some(Ok(rows)) => rows,
+    };
+    let mut y = widgets::paragraph(&mut c, t, f, top, l.pick(MODULES_HELP));
+    let (below, refresh) = widgets::section_action(&mut c, t, f, y, l.pick(MODULE_LIST), l.pick(REFRESH));
+    out.push(Hit { rect: refresh, action: Action::RescanModules });
+    y = below;
+    if rows.is_empty() {
+        y = widgets::footnote(&mut c, t, f, y, l.pick(NO_MODULES));
+        return Frame::new(t, fit(c, t, y), out, title, top);
+    }
+    let subs: Vec<String> = rows
+        .iter()
+        .map(|m| {
+            let state = l.pick(if m.closed() { MODULE_OFF } else { MODULE_ON });
+            let mut parts = vec![state];
+            if !m.version.is_empty() {
+                parts.push(m.version.as_str());
+            }
+            if m.remove_pending {
+                parts.push(l.pick(MODULE_REMOVE));
+            }
+            parts.join(" · ")
+        })
+        .collect();
+    let cards: Vec<Row> = rows.iter().zip(&subs).map(|(m, sub)| Row::new(m.display_name()).subtitle(sub)).collect();
+    let block = widgets::list(&mut c, t, f, y, &cards);
+    let actions: Vec<Action> = (0..rows.len()).map(Action::OpenModule).collect();
+    out.extend(hits(&block.rows, &actions));
+    y = widgets::footnote(&mut c, t, f, block.bottom, l.pick(MODULES_NOTE));
+    Frame::new(t, fit(c, t, y), out, title, top)
+}
+
+/// One KernelSU module: what its module.prop and its marker files say,
+/// and a swipe to turn it off. Nothing is deleted — the disable marker
+/// only makes KernelSU skip the module at the next boot.
+pub fn module_info(cx: &Ctx) -> Frame {
+    let (t, f, s, l) = (cx.t, cx.f, cx.state, cx.state.lang);
+    let mut c = long_page(cx);
+    let mut out = Vec::new();
+    let top = t.m.content_top;
+    let title = l.pick(MODULES);
+    // How the last turn-off went is shown even once the list was read
+    // again afterwards.
+    if let Some(work) = &s.module_work {
+        let id = work.id.as_str();
+        let text = match &work.outcome {
+            Ok(done) if done.already => tr!(l, "{id} 此前已关闭。", "{id} 此前已關閉。", "{id} was already turned off."),
+            Ok(done) => {
+                let at = done.marker.as_str();
+                tr!(l, "已关闭 {id}，下次启动生效。标记：{at}", "已關閉 {id}，下次啟動生效。標記：{at}", "Turned {id} off; takes effect on the next boot. Marker: {at}")
+            }
+            Err(why) => {
+                let why = why.as_str();
+                tr!(l, "关闭 {id} 失败：{why}", "關閉 {id} 失敗：{why}", "Couldn't turn {id} off: {why}")
+            }
+        };
+        let y = widgets::paragraph(&mut c, t, f, top, &text);
+        let back = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(l.pick(DONE)).trail(Trail::None)]);
+        out.extend(hits(&back.rows, &[Action::Back]));
+        return Frame::new(t, fit(c, t, back.bottom), out, title, top);
+    }
+    let Some(m) = s.modules.as_ref().and_then(|r| r.as_ref().ok()).and_then(|v| v.get(s.module_pick)) else {
+        let y = widgets::paragraph(&mut c, t, f, top, l.pick(NO_MODULE));
+        return Frame::new(t, fit(c, t, y), out, title, top);
+    };
+    let dash = "—";
+    let version = if m.version.is_empty() { dash } else { m.version.as_str() };
+    let version_code = if m.version_code.is_empty() { dash } else { m.version_code.as_str() };
+    let author = if m.author.is_empty() { dash } else { m.author.as_str() };
+    let description = if m.description.is_empty() { dash } else { m.description.as_str() };
+    let state = l.pick(if m.closed() { MODULE_OFF } else { MODULE_ON });
+    let markers = m.flags();
+    let flags = if markers.is_empty() { l.pick(NO_FLAGS).to_string() } else { markers.join(", ") };
+    let facts = vec![
+        Row::new(l.pick(MOD_ID)).trail(Trail::Text(&m.id)),
+        Row::new(l.pick(MOD_NAME)).trail(Trail::Text(m.display_name())),
+        Row::new(l.pick(MOD_VERSION)).trail(Trail::Text(version)),
+        Row::new(l.pick(MOD_VERSION_CODE)).trail(Trail::Text(version_code)),
+        Row::new(l.pick(MOD_AUTHOR)).trail(Trail::Text(author)),
+        Row::new(l.pick(MOD_STATE)).trail(Trail::Text(state)),
+        Row::new(l.pick(MOD_DIR)).trail(Trail::Text(&m.dir)),
+        Row::new(l.pick(MOD_FLAGS)).trail(Trail::Text(&flags)),
+    ];
+    let list = widgets::list(&mut c, t, f, top, &facts);
+    let mut y = widgets::paragraph(&mut c, t, f, list.bottom + t.m.card_gap, description);
+    y = widgets::section(&mut c, t, f, y, l.pick(CLOSE_SECTION));
+    y = widgets::paragraph(&mut c, t, f, y, l.pick(CLOSE_HELP));
+    if m.closed() {
+        y = widgets::footnote(&mut c, t, f, y, l.pick(ALREADY_OFF));
+    } else if s.module_asking {
+        let (label, danger) = confirm_label(Confirm::CloseModule, s);
+        let track = widgets::confirm(&mut c, t, f, y + t.m.dp(18.0), label, danger, s.confirm);
+        out.push(Hit { rect: track, action: Action::Confirm(Confirm::CloseModule) });
+        y = track.y + track.h;
+    } else {
+        let button = widgets::list(&mut c, t, f, y + t.m.card_gap, &[Row::new(l.pick(CLOSE_MODULE)).tint(ORANGE).trail(Trail::None)]);
+        out.extend(hits(&button.rows, &[Action::AskCloseModule]));
+        y = button.bottom;
+    }
+    Frame::new(t, fit(c, t, y), out, title, top)
+}
+
+const READING_MODULES: Text = ["正在读取 KernelSU 模块…", "正在讀取 KernelSU 模組…", "Reading the KernelSU modules…"];
+const READ_AGAIN: Text = ["重新读取", "重新讀取", "Read again"];
+const REFRESH: Text = ["刷新", "重新整理", "Refresh"];
+const MODULE_LIST: Text = ["已安装模块", "已安裝模組", "Installed modules"];
+const NO_MODULES: Text = ["/data/adb/modules 下没有找到 KernelSU 模块。", "/data/adb/modules 下沒有找到 KernelSU 模組。", "No KernelSU modules were found under /data/adb/modules."];
+const NO_MODULE: Text = ["该模块已不在列表中。", "該模組已不在清單中。", "That module is no longer in the list."];
+const NO_FLAGS: Text = ["无", "無", "None"];
+const MODULES_NEED_DATA: Text = [
+    "KernelSU 模块位于 data 分区，需先完成「解密」才能读取。",
+    "KernelSU 模組位於 data 分割區，需先完成「解密」才能讀取。",
+    "KernelSU modules live on the data partition. Decrypt it first to read them.",
+];
+const MODULES_HELP: Text = [
+    "点按模块查看其 id、版本、作者、说明与状态，并可将其关闭。关闭只创建 disable 标记，不删除任何文件、不运行卸载脚本，下次启动生效。",
+    "點按模組查看其 id、版本、作者、說明與狀態，並可將其關閉。關閉只建立 disable 標記，不刪除任何檔案、不執行卸載指令碼，下次啟動生效。",
+    "Tap a module to see its id, version, author, description and state, and to turn it off. Turning off only makes a disable marker: no file is deleted and no uninstall script runs. It takes effect on the next boot.",
+];
+const MODULES_NOTE: Text = [
+    "关闭后如需重新启用，请在系统的 KernelSU 管理器中打开该模块，或删除其目录下的 disable 文件。本页仅提供关闭功能。",
+    "關閉後如需重新啟用，請在系統的 KernelSU 管理器中開啟該模組，或刪除其目錄下的 disable 檔案。本頁僅提供關閉功能。",
+    "To turn a module back on, use the KernelSU manager in the system or remove the disable file from its folder. This page only turns modules off.",
+];
+const MODULE_ON: Text = ["已启用", "已啟用", "Enabled"];
+const MODULE_OFF: Text = ["已关闭", "已關閉", "Turned off"];
+const MODULE_REMOVE: Text = ["待删除", "待刪除", "marked for removal"];
+const MOD_ID: Text = ["模块 id", "模組 id", "Module id"];
+const MOD_NAME: Text = ["名称", "名稱", "Name"];
+const MOD_VERSION: Text = ["版本", "版本", "Version"];
+const MOD_VERSION_CODE: Text = ["版本号", "版本號", "Version code"];
+const MOD_AUTHOR: Text = ["作者", "作者", "Author"];
+const MOD_STATE: Text = ["状态", "狀態", "State"];
+const MOD_DIR: Text = ["目录", "目錄", "Folder"];
+const MOD_FLAGS: Text = ["标记与内容", "標記與內容", "Markers and contents"];
+const CLOSE_SECTION: Text = ["关闭模块", "關閉模組", "Turn the module off"];
+const CLOSE_MODULE: Text = ["关闭此模块", "關閉此模組", "Turn this module off"];
+const CLOSE_HELP: Text = [
+    "在此创建 disable 标记，KernelSU 将在下次启动时跳过该模块。模块文件、卸载脚本与系统改动都会保留，不会删除任何东西。",
+    "在此建立 disable 標記，KernelSU 將在下次啟動時跳過該模組。模組檔案、卸載指令碼與系統改動都會保留，不會刪除任何東西。",
+    "A disable marker is made here, and KernelSU skips this module on the next boot. The module's files, uninstall script and system changes all stay in place; nothing is deleted.",
+];
+const ALREADY_OFF: Text = [
+    "该模块已关闭。本页仅提供关闭功能，重新启用请在系统的 KernelSU 管理器中操作，或手动删除 disable 文件。",
+    "該模組已關閉。本頁僅提供關閉功能，重新啟用請在系統的 KernelSU 管理器中操作，或手動刪除 disable 檔案。",
+    "This module is already off. This page only turns modules off; turn it back on in the KernelSU manager or delete the disable file by hand.",
+];
+
+/// Keeping the screen lock: the settings page's switch, its note, and the
+/// warning that the credential is written in the clear.
+const REMEMBER_DATA: Text = ["记住解密密码", "記住解密密碼", "Remember the decrypt credential"];
+const REMEMBER_DATA_NOTE: Text = [
+    "下次启动自动解密 data 分区",
+    "下次啟動自動解密 data 分割區",
+    "Decrypt the data partition on its own next start",
+];
+const REMEMBER_DATA_SAFETY: Text = [
+    "锁屏密码以明文保存在 recovery 专用的 /metadata 分区（只有 recovery 能读取）。关闭此开关会立即清除已保存的密码。",
+    "螢幕鎖定密碼以明文保存在 recovery 專用的 /metadata 分割區（只有 recovery 能讀取）。關閉此開關會立即清除已保存的密碼。",
+    "The screen lock is kept in the clear in /metadata, which only the recovery can read. Turning this off clears the saved credential at once.",
+];
 
 const RELABEL: Text = ["修复 SELinux 上下文", "修復 SELinux 上下文", "Fix SELinux contexts"];
 const FILESYSTEMS: Text = ["文件系统", "檔案系統", "Filesystems"];
@@ -2886,8 +3370,16 @@ pub fn wlan(cx: &Ctx) -> Frame {
     let mut out = Vec::new();
     let top = t.m.content_top;
     let on = !matches!(w.power, Power::Off | Power::Failed(_));
-    let switch = widgets::list(&mut c, t, f, top, &[Row::new(l.pick(WLAN)).trail(Trail::Switch(on))]);
-    out.extend(hits(&switch.rows, &[Action::Toggle(Switch::Wlan)]));
+    let saved = s.wlan_saved.len();
+    let auto_note = match saved {
+        0 => l.pick(AUTO_NONE).to_string(),
+        n => tr!(l, "已记住 {n} 个网络", "已記住 {n} 個網路", "{n} networks remembered"),
+    };
+    let switch = widgets::list(&mut c, t, f, top, &[
+        Row::new(l.pick(WLAN)).trail(Trail::Switch(on)),
+        Row::new(l.pick(AUTO_WLAN)).subtitle(&auto_note).trail(Trail::Switch(s.wlan_auto)),
+    ]);
+    out.extend(hits(&switch.rows, &[Action::Toggle(Switch::Wlan), Action::Toggle(Switch::WlanAuto)]));
     // LocalSend shares this WLAN. Its own page starts and stops the endpoint;
     // the row here says how it stands so the entry is worth a tap.
     let ls = &s.local_send;

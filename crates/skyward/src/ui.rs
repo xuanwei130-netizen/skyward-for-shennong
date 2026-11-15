@@ -3,6 +3,7 @@ use crate::decrypt::{self, Decryptor};
 use crate::filework;
 use crate::haptics::Haptics;
 use crate::relabel;
+use crate::rescue;
 use crate::input::{monotonic_ms, Event, Inputs};
 use crate::merge;
 use crate::partwork;
@@ -37,9 +38,10 @@ use skyward_sys::uevent;
 use skyward_systems::Who;
 use skyward_ui::app::{
     App, Asked, BackupAt, BackupEnd, BackupEntry, BackupRefusal, ClashChoice, Data, DownloadEnd, Effect, EraseStop, FileKind, FileOp,
-    FileRow, FileTask, FsAction, FsRow, Have, Held, ItemEnd, ItemState, JobEnd, Keys, MountFailure, Part, PartKind, PartStop, Place,
-    RenameRefused, Screen, Shot, SkywardEnd, SkywardStage, Target, UsbDrive, UsbLink, Wipe, DATA_OPENING, DATA_PARTITION, DOWNLOADS,
-    INSTALL_UNFINISHED, USB_DRIVE,
+    FileRow, FileTask, FsAction, FsRow, Have, Held, ItemEnd, ItemState, JobEnd, Keys, ModuleClosed, ModuleRow, ModuleWork,
+    MountFailure, Part, PartKind, PartStop, Place, RenameRefused, RescueEnd, Screen, Shot, SkywardEnd, SkywardStage, Target, UnlockStage,
+    Unlocked, UsbDrive, UsbLink, Wipe,
+    DATA_OPENING, DATA_PARTITION, DOWNLOADS, INSTALL_UNFINISHED, USB_DRIVE,
 };
 use skyward_ui::settings::Keeper;
 use skyward_ui::surface::kms::KmsSurface;
@@ -822,6 +824,9 @@ fn fs_part(name: &str) -> Result<partwork::Part> {
 enum Incoming {
     /// The page shown first, which may ask for work as it shows.
     Arrived,
+    /// Work the pages asked for as the data partition opened, such as
+    /// decrypting with a remembered credential.
+    Work(Effect),
     Input(Event),
     Asked(Request),
     Drive(Option<UsbDrive>),
@@ -865,7 +870,7 @@ fn log_mounted(mounted: &Opened) -> Result<()> {
 /// that lock is answered with, or nothing. Users whose credential the phone
 /// made up open behind the owner and are never asked; one that did not
 /// open goes to the kernel log with why.
-fn show_closed(app: &mut App, closed: &[Closed]) -> Result<()> {
+fn show_closed(app: &mut App, closed: &[Closed]) -> Result<Vec<Effect>> {
     use skyward_crypto::user::Lock;
     skyward_sys::kmsg(&format!("the users whose own files are still closed: {:?}", closed.iter().map(|c| c.user).collect::<Vec<_>>()))?;
     for c in closed {
@@ -882,7 +887,9 @@ fn show_closed(app: &mut App, closed: &[Closed]) -> Result<()> {
         (c.user, keys)
     });
     app.data_waiting(waiting);
-    Ok(())
+    // A credential kept from an earlier start opens the user's own files
+    // without their having to type it again.
+    Ok(app.auto_unlock())
 }
 
 /// What the file manager lists for a folder: its entries, folders and
@@ -1018,6 +1025,51 @@ const SCAN_EVERY: Duration = Duration::from_secs(10);
 
 fn wlan_worker(w: &Option<wlan::Worker>) -> Result<&wlan::Worker> {
     w.as_ref().context("the phone's WLAN is not brought up")
+}
+
+/// The networks the WLAN page keeps, as the WLAN thread takes them.
+fn auto_of(app: &App) -> wlan::Auto {
+    wlan::Auto {
+        enabled: app.state.wlan_auto,
+        saved: app
+            .state
+            .wlan_saved
+            .iter()
+            .map(|s| wlan::Saved { ssid: s.ssid.clone(), name: s.name.clone(), security: s.security, password: s.password.0.clone() })
+            .collect(),
+    }
+}
+
+/// What the modules page shows of a KernelSU module the runtime read.
+/// The page's name for the half of the chat app's work that is under way.
+fn unlock_stage(stage: skyward_wechat::Stage) -> UnlockStage {
+    match stage {
+        skyward_wechat::Stage::Databases => UnlockStage::Databases,
+        skyward_wechat::Stage::Pictures => UnlockStage::Pictures,
+    }
+}
+
+/// What a chat app's folder gave back, as the page counts it.
+fn unlocked(given: skyward_wechat::Given) -> Unlocked {
+    Unlocked { pictures: given.pictures, databases: given.databases.len() }
+}
+
+fn module_row(m: skyward_modules::manage::Module) -> ModuleRow {
+    ModuleRow {
+        id: m.id,
+        name: m.name,
+        version: m.version,
+        version_code: m.version_code,
+        author: m.author,
+        description: m.description,
+        dir: m.dir.display().to_string(),
+        enabled: m.enabled,
+        remove_pending: m.remove_pending,
+        skip_mount: m.skip_mount,
+        update_pending: m.update_pending,
+        has_uninstall: m.has_uninstall,
+        has_system: m.has_system,
+    }
 }
 
 /// The installed system, as the update server is told of it.
@@ -1356,6 +1408,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut relabeler: Option<filework::Worker> = None;
     // Backing up or restoring under way.
     let mut backuper: Option<backup::Worker> = None;
+    // Looking across the phone for what is worth keeping, or copying it
+    // out, under way.
+    let mut rescuer: Option<rescue::Worker> = None;
     // An update's merge followed: one the recovery found under way, which
     // the kernel took up again as the snapshots were mapped, or one started
     // on the update page.
@@ -1381,7 +1436,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 let _ = skyward_sys::kmsg(&format!("the vendor interface's libraries are not open: {e:#}"));
                 None
             });
-            Some(wlan::Worker::start(w.clone(), modules, libraries, servers.clone())?)
+            Some(wlan::Worker::start(w.clone(), modules, libraries, servers.clone(), auto_of(&app))?)
         }
         None => None,
     };
@@ -1409,6 +1464,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut drive_at = Instant::now();
     loop {
         let now = monotonic_ms();
+        // Effects the pages ask for as the data partition opens, such as
+        // decrypting with a kept credential.
+        let mut auto_effects: Vec<Effect> = Vec::new();
         if leave_at.is_some_and(|at| now >= at) {
             leave_at = None;
             power(leave)?;
@@ -1636,6 +1694,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if let Some(s) = &systems_worker {
             fds.push(s.fd());
         }
+        if let Some(r) = &rescuer {
+            fds.push(r.fd());
+        }
         fds.push(readings.fd());
         wait(&fds, timeout)?;
         let now = monotonic_ms();
@@ -1755,7 +1816,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                             log_mounted(mounted)?;
                         }
                         closed = opening.closed;
-                        show_closed(&mut app, &closed)?;
+                        auto_effects.extend(show_closed(&mut app, &closed)?);
                     }
                     wipe::Event::Ended(outcome) => {
                         let said = outcome.as_ref().map_or_else(wipe::said, |_| "done".to_string());
@@ -1809,6 +1870,35 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     }
                 }
             }
+        }
+        let mut rescued = false;
+        if let Some(r) = &rescuer {
+            for ev in r.events() {
+                match ev {
+                    rescue::Event::Progress(p) => app.rescue_progress(p),
+                    rescue::Event::Found(found) => app.rescue_found(found),
+                    rescue::Event::Unlocking(stage, count) => {
+                        app.rescue_unlocking(unlock_stage(stage), count)
+                    }
+                    rescue::Event::Saved(summary, opened) => app.rescue_saved(summary, opened.map(unlocked)),
+                    rescue::Event::Ended(end) => {
+                        let end = match end {
+                            rescue::End::Done => None,
+                            rescue::End::Stopped => Some(RescueEnd::Stopped),
+                            rescue::End::Failed(why) => Some(RescueEnd::Failed(why)),
+                        };
+                        // A look that ended well has already put what it
+                        // found on the page; anything else says how it went.
+                        if let Some(end) = end {
+                            app.rescue_ended(end);
+                        }
+                        rescued = true;
+                    }
+                }
+            }
+        }
+        if rescued {
+            rescuer = None;
         }
         let mut relabeled = false;
         if let Some(r) = &relabeler {
@@ -2095,7 +2185,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         log_mounted(mounted)?;
                     }
                     closed = opening.closed;
-                    show_closed(&mut app, &closed)?;
+                    auto_effects.extend(show_closed(&mut app, &closed)?);
                 }
                 decrypt::Ended::Opened(Err(why)) => {
                     skyward_sys::kmsg(&format!("the data partition stays closed: {why}"))?;
@@ -2113,7 +2203,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 }
                 decrypt::Ended::Unlocked(Ok(still)) => {
                     closed = still;
-                    show_closed(&mut app, &closed)?;
+                    auto_effects.extend(show_closed(&mut app, &closed)?);
                 }
                 decrypt::Ended::Unlocked(Err(why)) => {
                     skyward_sys::kmsg(&format!("what was entered did not open the user's files: {why}"))?;
@@ -2163,15 +2253,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             Some(c) => c.requests()?,
             None => Vec::new(),
         };
-        let incoming = arriving
-            .take()
+        let incoming = auto_effects
             .into_iter()
+            .map(Incoming::Work)
+            .chain(arriving.take())
             .chain(drive_told.map(Incoming::Drive))
             .chain(requests.into_iter().map(Incoming::Asked))
             .chain(inputs.read()?.into_iter().map(Incoming::Input));
         for came in incoming {
             let effects = match came {
                 Incoming::Arrived => app.arrive(),
+                Incoming::Work(fx) => vec![fx],
                 Incoming::Drive(drive) => app.set_usb_drive(drive),
                 Incoming::Asked(asked) => {
                     skyward_sys::kmsg(&format!("asked on the recovery socket: {asked:?}"))?;
@@ -2536,14 +2628,68 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         merger = Some(merge::Merger::start(slot, true)?);
                     }
                     Effect::Wlan(on) => wlan_worker(&wlan)?.send(if on { wlan::Command::On } else { wlan::Command::Off }),
+                    // The page's switch, a network joined by hand, and a
+                    // network forgotten all change what the WLAN may join
+                    // on its own.
+                    Effect::WlanConfig => wlan_worker(&wlan)?.send(wlan::Command::Auto(auto_of(&app))),
                     Effect::ScanWlan => {
                         scanned_at = Instant::now();
                         wlan_worker(&wlan)?.send(wlan::Command::Scan);
                     }
                     Effect::JoinWlan { ssid, name, security, password } => {
+                        if app.state.wlan_auto {
+                            app.remember_wlan(ssid.clone(), name.clone(), security, password.0.clone());
+                            wlan_worker(&wlan)?.send(wlan::Command::Auto(auto_of(&app)));
+                        }
                         wlan_worker(&wlan)?.send(wlan::Command::Join { ssid, name, security, password: password.0 })
                     }
-                    Effect::LeaveWlan => wlan_worker(&wlan)?.send(wlan::Command::Leave),
+                    Effect::LeaveWlan => {
+                        if let Some(ssid) = app.state.wlan.as_ref().and_then(|w| w.joined.as_ref()).map(|j| j.ssid.clone()) {
+                            app.forget_wlan(&ssid);
+                            wlan_worker(&wlan)?.send(wlan::Command::Auto(auto_of(&app)));
+                        }
+                        wlan_worker(&wlan)?.send(wlan::Command::Leave);
+                    }
+                    Effect::RescueScan(kinds) => {
+                        if let Some(r) = &rescuer {
+                            r.stop();
+                        }
+                        rescuer = Some(rescue::Worker::start(rescue::Task::Scan(kinds))?);
+                    }
+                    Effect::RescueSave(found) => {
+                        if let Some(r) = &rescuer {
+                            r.stop();
+                        }
+                        // Where a copy out goes is the runtime's to know:
+                        // shared storage is the only place with room for
+                        // several gigabytes.
+                        match rescue::target() {
+                            Ok(into) => rescuer = Some(rescue::Worker::start(rescue::Task::Export { found, into })?),
+                            Err(e) => {
+                                app.rescue_ended(RescueEnd::Failed(format!("{e:#}")));
+                                rescuer = None;
+                            }
+                        }
+                    }
+                    Effect::RescueStop => {
+                        if let Some(r) = &rescuer {
+                            r.stop();
+                        }
+                    }
+                    Effect::ReadModules => {
+                        let root = Path::new(skyward_modules::manage::KSU_MODULES);
+                        let rows = skyward_modules::manage::list(root)
+                            .map(|modules| modules.into_iter().map(module_row).collect())
+                            .map_err(|e| format!("{e:#}"));
+                        app.set_modules(rows);
+                    }
+                    Effect::CloseModule { id } => {
+                        let root = Path::new(skyward_modules::manage::KSU_MODULES);
+                        let outcome = skyward_modules::manage::close(root, &id)
+                            .map(|done| ModuleClosed { marker: done.marker.display().to_string(), already: done.already })
+                            .map_err(|e| format!("{e:#}"));
+                        queue.extend(app.module_closed(ModuleWork { id, outcome }));
+                    }
                     Effect::LocalSend(on) => {
                         if !on {
                             local_send = None;

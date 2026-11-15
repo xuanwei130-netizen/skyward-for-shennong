@@ -439,6 +439,16 @@ pub struct Service {
     /// names it: it keeps these alone, through its change of user.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// The other paths the program is at, on the other builds of the
+    /// hardware the phone's own build might be: the first one that is
+    /// there is used in place of `path`.
+    #[serde(default)]
+    pub alternates: Option<Vec<String>>,
+    /// The program may be missing, or may not come up, and what it offers
+    /// is lost alone: the programs after it are started regardless, where
+    /// one without this holds them up until it answers.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 /// The kernel's capabilities, by the names init's capabilities lines give

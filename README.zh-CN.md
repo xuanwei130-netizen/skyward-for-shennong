@@ -25,6 +25,7 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 - 清除数据、恢复出厂设置
 - 挂载分区，修复和格式化文件系统
 - 文件管理和终端
+- 数据救援：从开不了机的手机里扫出照片（含相机原片与动态图）和视频、文档，微信数据整个目录原样导出
 - 连接 WLAN
 - MTP 文件传输、adb 和 fastbootd
 - 重启到系统、recovery、fastboot、bootloader 和 EDL，切换启动槽位
@@ -48,8 +49,8 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 Skyward 需要已解锁的 bootloader。从 [Releases](https://github.com/xuanwei130-netizen/skyward-for-shennong/releases) 下载对应的 zip。使用 `SHA256SUMS` 核对并解压之后，在手机处于 fastboot 模式的时候，把其中的镜像刷入当前运行槽位的 recovery 分区：
 
 ```sh
-unzip skyward-v0.2.0-shennong.1-shennong-OS3.0.309.0.WNBCNXM.zip
-fastboot flash recovery skyward-v0.2.0-shennong.1-shennong-OS3.0.309.0.WNBCNXM.img
+unzip skyward-v0.3.1-shennong.3-shennong-OS3.0.309.0.WNBCNXM.zip
+fastboot flash recovery skyward-v0.3.1-shennong.3-shennong-OS3.0.309.0.WNBCNXM.img
 fastboot reboot recovery
 ```
 

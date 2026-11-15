@@ -1,4 +1,4 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use procfs::process::{FDTarget, MMapPath, Process};
 use skyward_config::Service;
 use skyward_sys::ueventd;
@@ -41,26 +41,71 @@ const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
     let known = ueventd::accounts(&ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).copied().collect::<Vec<_>>());
     for s in services {
-        if !Path::new(&s.path).is_file() {
-            bail!("{} is missing; is its partition mounted?", s.path);
-        }
         let mut s = s.clone();
+        if !Path::new(&s.path).is_file() {
+            // Another build of the same hardware keeps the program
+            // somewhere else, and the table names the path of the build it
+            // was written for.
+            match s.alternates.as_ref().and_then(|alts| alts.iter().find(|a| Path::new(a).is_file()).cloned()) {
+                Some(found) => {
+                    let _ = skyward_sys::kmsg(&format!("{}: this build keeps it at {found}", s.path));
+                    s.path = found;
+                }
+                None if s.optional => {
+                    let _ = skyward_sys::kmsg(&format!("{} is missing, and it is optional; going on without it", s.path));
+                    continue;
+                }
+                None => bail!("{} is missing; is its partition mounted?", s.path),
+            }
+        }
         if let Some(dir) = libraries {
             s.libraries.push(dir.to_string_lossy().into_owned());
         }
         let who = Credentials::of(&s, &known)?;
         if s.oneshot {
             let status = command(&s, &who).status().with_context(|| format!("run {}", s.path))?;
-            ensure!(status.success(), "{} {} ended: {status}", s.path, s.args.join(" "));
+            if !status.success() {
+                if s.optional {
+                    let _ = skyward_sys::kmsg(&format!("{} {} ended: {status}; it is optional, so the ones after it go on", s.path, s.args.join(" ")));
+                    continue;
+                }
+                bail!("{} {} ended: {status}", s.path, s.args.join(" "));
+            }
             skyward_sys::kmsg(&format!("ran {} {}", s.path, s.args.join(" ")))?;
             continue;
+        }
+        // A wrapper is here whichever build the hardware is, and hands over
+        // to a program that is not: that is a service this build does not
+        // have, and waiting on it would hold up every program after it.
+        if !present(&s) {
+            if s.optional {
+                let _ = skyward_sys::kmsg(&format!("{}: this build has none of the programs it runs; going on without it", s.path));
+                continue;
+            }
+            bail!("{}: none of {} is here", s.path, s.args.join(", "));
         }
         let waiting = s.clone();
         let name = Path::new(&s.path).file_name().map_or_else(|| s.path.clone(), |n| n.to_string_lossy().into_owned());
         thread::Builder::new().name(name).spawn(move || supervise(&s, &who)).context("start a supervising thread")?;
-        ready(&waiting)?;
+        if let Err(e) = ready(&waiting) {
+            if waiting.optional {
+                let _ = skyward_sys::kmsg(&format!("{e:#}; it is optional, so the ones after it go on"));
+                continue;
+            }
+            return Err(e);
+        }
     }
     Ok(())
+}
+
+/// Whether the phone has what `s` runs. Only a service written for more
+/// than one build of the hardware says anything but its own path, and the
+/// wrapper it gives there runs a program the build may not have: it is
+/// here only where that program is.
+fn present(s: &Service) -> bool {
+    let Some(alternates) = &s.alternates else { return true };
+    let program = s.args.iter().find(|a| a.starts_with('/')).is_none_or(|p| Path::new(p).is_file());
+    program || alternates.iter().any(|a| Path::new(a).is_file())
 }
 
 /// Who a program runs as and what of root's it keeps, as the phone's own
@@ -189,18 +234,25 @@ fn ready(s: &Service) -> Result<()> {
     }
 }
 
-fn supervise(s: &Service, who: &Credentials) -> ! {
+fn supervise(s: &Service, who: &Credentials) {
     loop {
         let started = Instant::now();
         let ended = match running(&s.path) {
             Some(pid) => wait_for(pid).map(|()| format!("pid {pid}, left by an earlier recovery service, exited")),
             None => run(s, who),
         };
-        let line = match ended {
+        let line = match &ended {
             Ok(how) => format!("{}: {how}", s.path),
             Err(e) => format!("{}: {e:#}", s.path),
         };
         let _ = skyward_sys::kmsg(&line);
+        // A program of a service that may be absent is not tried again and
+        // again: what it offered is lost, and the recovery goes on as it
+        // is in the rest.
+        if ended.is_err() && s.optional {
+            let _ = skyward_sys::kmsg(&format!("{}: it is optional, so it is left to itself", s.path));
+            return;
+        }
         if started.elapsed() < RESTART_DELAY {
             thread::sleep(RESTART_DELAY);
         }
